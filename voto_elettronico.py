@@ -2,7 +2,6 @@ import os
 import json
 import time
 import secrets
-import random
 from collections import Counter
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
@@ -188,10 +187,12 @@ class BulletinBoard:
         self.verbale = None
 
     def publish_batch(self, batch_data):
-        """Riceve e memorizza le informazioni di un blocco di ricevute."""
+        """Riceve e memorizza le informazioni di un batch pubblicato dall'Urna."""
         self.batches.append(batch_data)
         print(f"[Bulletin Board] Pubblicato BATCH #{batch_data['batch_id']} | "
-              f"Ricevute incluse: {len(batch_data['receipt_ids'])} | Merkle Root: {batch_data['RMerkle'].hex()[:16]}...")
+              f"Nuove ricevute: {len(batch_data['receipt_ids_batch'])} | "
+              f"Ricevute totali: {batch_data['receipt_count_totale']} | "
+              f"Merkle Root globale: {batch_data['RMerkle_globale'].hex()[:16]}...")
 
     def publish_final_closure(self, final_data):
         """Pubblica i dati aggregati alla chiusura delle urne."""
@@ -255,7 +256,11 @@ class ElectronicUrn:
         self.voti_registrati = []
         self.receipt_ids_correnti = []
         self.batch_counter = 0
-        self.batch_size = 3
+        self.batch_size = 3                  # soglia dimostrativa B_min per il prototipo
+        self.max_batch_wait_seconds = 900     # Delta_max: 15 minuti nel modello teorico
+        self.batch_opened_at = None
+        self.albero_globale = MerkleTree([])
+        self.root_corrente = b""
 
     def ricevi_voto(self, payload, pk_as, bb: BulletinBoard):
         """Valida l'autorizzazione di voto del payload, calcola il ReceiptID e gestisce i batch."""
@@ -291,65 +296,111 @@ class ElectronicUrn:
         self.voti_registrati.append({"receipt_id": receipt_id, "C": C, "T": T})
         self.receipt_ids_correnti.append(receipt_id)
 
+        if self.batch_opened_at is None:
+            self.batch_opened_at = timestamp
+
         print(f"[Urna] Voto accettato e registrato con successo. ReceiptID emesso: {receipt_id.hex()[:12]}...")
 
-        if len(self.receipt_ids_correnti) == self.batch_size:
+        if self._deve_pubblicare_batch(timestamp):
             self._pubblica_batch_su_bb(bb)
 
         return ricevuta
 
+    def _deve_pubblicare_batch(self, timestamp_corrente):
+        """Implementa il batching ibrido: soglia minima di voti oppure tempo massimo."""
+        if len(self.receipt_ids_correnti) >= self.batch_size:
+            return True
+        if self.batch_opened_at is not None:
+            tempo_trascorso = timestamp_corrente - self.batch_opened_at
+            return tempo_trascorso >= self.max_batch_wait_seconds
+        return False
+
+    def _receipt_ids_globali(self):
+        """Restituisce tutti i ReceiptID registrati fino a questo momento, nell'ordine di accettazione."""
+        return [v["receipt_id"] for v in self.voti_registrati]
+
+    def _voti_cifrati_globali(self):
+        """Restituisce tutti i ciphertext registrati, senza shuffle e nello stesso ordine dei ReceiptID."""
+        return [v["C"] for v in self.voti_registrati]
+
+    def _hash_lista_ciphertext(self, ciphertexts):
+        """Calcola un digest dell'elenco dei ciphertext, così la firma finale copre anche i voti cifrati."""
+        return sha256(b"".join(sha256(c) for c in ciphertexts))
+
     def _pubblica_batch_su_bb(self, bb: BulletinBoard):
-        """Costruisce un Merkle Tree per il blocco corrente e lo invia al Bulletin Board."""
+        """
+        Pubblica il batch corrente e ricalcola la Merkle Root globale dell'urna.
+
+        Il batch serve solo come soglia di pubblicazione.
+        La Merkle Root pubblicata rappresenta sempre l'albero complessivo
+        formato da tutti i ReceiptID registrati fino a quel momento.
+        """
         self.batch_counter += 1
-        
-        albero_batch = MerkleTree(self.receipt_ids_correnti)
-        r_merkle = albero_batch.root
-        
+
+        receipt_ids_batch_hex = [r.hex() for r in self.receipt_ids_correnti]
+        receipt_ids_globali = self._receipt_ids_globali()
+        receipt_ids_globali_hex = [r.hex() for r in receipt_ids_globali]
+
+        self.albero_globale = MerkleTree(receipt_ids_globali)
+        self.root_corrente = self.albero_globale.root
+
         timestamp_batch = int(time.time())
-        receipt_ids_hex = [r.hex() for r in self.receipt_ids_correnti]
-        
-        data_to_sign = f"{self.batch_counter}".encode() + "".join(receipt_ids_hex).encode() + r_merkle + str(timestamp_batch).encode()
-        sig_ue_batch = firma_rsa_pss(self.private_key, data_to_sign)
+        data_to_sign = (
+            self.election_id.encode()
+            + str(self.batch_counter).encode()
+            + "".join(receipt_ids_batch_hex).encode()
+            + "".join(receipt_ids_globali_hex).encode()
+            + self.root_corrente
+            + str(timestamp_batch).encode()
+        )
+        sig_ue_batch = firma_rsa_pss(self.private_key, sha256(data_to_sign))
 
         batch_pub = {
             "batch_id": self.batch_counter,
-            "receipt_ids": receipt_ids_hex,
-            "RMerkle": r_merkle,
-            "Timestampbatch": timestamp_batch,
+            "receipt_ids_batch": receipt_ids_batch_hex,
+            "receipt_ids_globali": receipt_ids_globali_hex,
+            "receipt_count_totale": len(receipt_ids_globali_hex),
+            "RMerkle_globale": self.root_corrente,
+            "TimestampBatch": timestamp_batch,
             "SigUE": sig_ue_batch
         }
-        
+
         bb.publish_batch(batch_pub)
         self.receipt_ids_correnti = []
+        self.batch_opened_at = None
 
     def chiudi_urna_e_pubblica_risultati(self, bb: BulletinBoard):
-        """Chiude ufficialmente le votazioni ordinando e mescolando i dati finali sul Bulletin Board."""
+        """Chiude ufficialmente le votazioni e pubblica i dati finali sul Bulletin Board."""
         if self.receipt_ids_correnti:
             print("[Urna] Svuotamento buffer: Pubblicazione del batch residuo prima della chiusura...")
             self._pubblica_batch_su_bb(bb)
 
-        tutti_i_receipt_ids = [v["receipt_id"] for v in self.voti_registrati]
+        tutti_i_receipt_ids = self._receipt_ids_globali()
         tutti_i_receipt_ids_hex = [r.hex() for r in tutti_i_receipt_ids]
 
         albero_complessivo = MerkleTree(tutti_i_receipt_ids)
         r_finale = albero_complessivo.root
 
-        timestamp_chiusura = int(time.time())
-        data_to_sign = self.election_id.encode() + r_finale + str(timestamp_chiusura).encode()
-        sig_vs = firma_rsa_pss(self.private_key, sha256(data_to_sign))
+        voti_cifrati = self._voti_cifrati_globali()
+        hash_voti_cifrati = self._hash_lista_ciphertext(voti_cifrati)
 
-        voti_cifrati_grezzi = [v["C"] for v in self.voti_registrati]
-        voti_cifrati_shuffled = list(voti_cifrati_grezzi)
-        random.seed(secrets.randbits(64))
-        random.shuffle(voti_cifrati_shuffled)
+        timestamp_chiusura = int(time.time())
+        data_to_sign = (
+            self.election_id.encode()
+            + r_finale
+            + hash_voti_cifrati
+            + str(timestamp_chiusura).encode()
+        )
+        sig_ue = firma_rsa_pss(self.private_key, sha256(data_to_sign))
 
         final_pub = {
             "election_id": self.election_id,
             "receipt_ids": tutti_i_receipt_ids_hex,
             "R_finale": r_finale,
+            "hash_voti_cifrati": hash_voti_cifrati,
             "timestamp_chiusura": timestamp_chiusura,
-            "SigVS": sig_vs,
-            "voti_cifrati": voti_cifrati_shuffled
+            "SigUE": sig_ue,
+            "voti_cifrati": voti_cifrati
         }
 
         bb.publish_final_closure(final_pub)
@@ -364,7 +415,7 @@ class ElectoralAuthority:
 
     def esegui_scrutinio(self, bb: BulletinBoard, total_as_tokens_issued, pk_urn):
         """Scarica i dati dal BB, effettua i ricalcoli di integrità e compie il conteggio."""
-        print("\n--- [AE] COMINCIAMENTO DELLA FASE 5: SCRUTINIO DEI RISULTATI ---")
+        print("\n--- [AE] AVVIO DELLA FASE 5: SCRUTINIO DEI RISULTATI ---")
         
         final_pub = bb.final_publication
         if not final_pub:
@@ -374,21 +425,28 @@ class ElectoralAuthority:
         election_id = final_pub['election_id']
         r_finale_bb = final_pub['R_finale']
         timestamp_chiusura = final_pub['timestamp_chiusura']
-        sig_vs = final_pub['SigVS']
+        sig_ue = final_pub['SigUE']
+        hash_voti_cifrati = final_pub['hash_voti_cifrati']
         receipt_ids_pubblicati = final_pub['receipt_ids']
         voti_cifrati_da_scrutinare = final_pub['voti_cifrati']
 
-        data_to_verify = election_id.encode() + r_finale_bb + str(timestamp_chiusura).encode()
-        if not verifica_rsa_pss(pk_urn, sig_vs, sha256(data_to_verify)):
+        hash_voti_cifrati_ricalcolato = sha256(b"".join(sha256(c) for c in voti_cifrati_da_scrutinare))
+        if hash_voti_cifrati_ricalcolato != hash_voti_cifrati:
+            print("[AE] Errore di Integrità: L'elenco dei voti cifrati è stato alterato.")
+            return None
+        print("[AE] Sotto-fase 1/4: Integrità dell'elenco dei voti cifrati confermata.")
+
+        data_to_verify = election_id.encode() + r_finale_bb + hash_voti_cifrati + str(timestamp_chiusura).encode()
+        if not verifica_rsa_pss(pk_urn, sig_ue, sha256(data_to_verify)):
             print("[AE] Errore di Autenticità: La firma dell'Urna Elettronica non è valida.")
             return None
-        print("[AE] Sotto-fase 1/3: Autenticità della firma dell'Urna verificata con successo.")
+        print("[AE] Sotto-fase 2/4: Autenticità della firma dell'Urna verificata con successo.")
 
         albero_ricalcolato = MerkleTree(receipt_ids_pubblicati)
         if albero_ricalcolato.root != r_finale_bb:
             print("[AE] Errore di Integrità: La radice Merkle ricalcolata differisce da quella pubblicata!")
             return None
-        print("[AE] Sotto-fase 2/3: Integrità della struttura dati Merkle Root confermata.")
+        print("[AE] Sotto-fase 3/4: Integrità della struttura dati Merkle Root confermata.")
 
         num_receipts = len(receipt_ids_pubblicati)
         num_ciphertexts = len(voti_cifrati_da_scrutinare)
@@ -396,7 +454,7 @@ class ElectoralAuthority:
         if not (num_receipts == num_ciphertexts == total_as_tokens_issued):
             print("[AE] Errore di Flusso: Rilevata un'incoerenza quantitativa tra i moduli di controllo!")
             return None
-        print("[AE] Sotto-fase 3/3: Coerenza quantitativa approvata.")
+        print("[AE] Sotto-fase 4/4: Coerenza quantitativa approvata.")
 
         conteggio_liste = Counter()
         conteggio_candidati = Counter()
@@ -504,8 +562,8 @@ class Elector:
                 return True
         return False
 
-    def verifica_inclusione_individuale(self, albero_complessivo_elezione: MerkleTree, bb: BulletinBoard):
-        """Fase 4: Consente all'elettore di controllare l'effettiva presenza del voto nel BB."""
+    def verifica_inclusione_individuale(self, bb: BulletinBoard):
+        """Fase 4: consente all'elettore di controllare l'inclusione usando i dati pubblici del BB."""
         if not self.ricevuta:
             print(f"[Elettore {self.nome}] Nessuna ricevuta memorizzata. Verifica non eseguibile.")
             return False
@@ -524,8 +582,9 @@ class Elector:
             print(f"[Elettore {self.nome}] ALLARME FRODE: Il mio ReceiptID non figura sul Bulletin Board pubblico!")
             return False
 
+        albero_pubblico = MerkleTree(receipt_ids_pubblicati)
         indice_foglia = receipt_ids_pubblicati.index(my_receipt_id_hex)
-        proof = albero_complessivo_elezione.get_proof(indice_foglia)
+        proof = albero_pubblico.get_proof(indice_foglia)
 
         is_valid = MerkleTree.verify_proof(self.ricevuta["ReceiptID"], proof, r_finale_bb)
 
@@ -596,7 +655,7 @@ if __name__ == "__main__":
     print("\n--- FASE 4: VERIFICA INDIVIDUALE DELLE MERKLE PROOF DA PARTE DEGLI ELETTORI ---")
     for elettore in elettori:
         # [CORRETTO] Sistemato nome metodo coerente con la classe Elector
-        elettore.verifica_inclusione_individuale(albero_complessivo_elezione, bb)
+        elettore.verifica_inclusione_individuale(bb)
 
     # 4. SCRUTINIO FINALE E RENDICONTAZIONE (Fase 5)
     pubblicazione_finale = autorita_elettorale.esegui_scrutinio(
@@ -613,7 +672,7 @@ if __name__ == "__main__":
         print(f"Identificativo Elezione : {verbale['election_id']}")
         print(f"Ricevute Totali sul BB  : {verbale['m']}")
         print(f"Voti Decifrati          : {verbale['voti_decifrati']}")
-        print(f"Voti Valivi             : {verbale['voti_validi']}")
+        print(f"Voti Validi             : {verbale['voti_validi']}")
         print(f"Voti Annullati/Non Val. : {verbale['voti_non_validi']} (Es. Candidato incoerente con la lista)")
         print("---------------------------------------------------------------------")
         print("CONTEGGIO VOTI DI LISTA:")
