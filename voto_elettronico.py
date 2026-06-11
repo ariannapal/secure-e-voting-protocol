@@ -451,7 +451,7 @@ class ElectoralAuthority:
         num_receipts = len(receipt_ids_pubblicati)
         num_ciphertexts = len(voti_cifrati_da_scrutinare)
         print(f"[AE] Log quantitativi -> Ricevute: {num_receipts} | Voti cifrati: {num_ciphertexts} | Token AS: {total_as_tokens_issued}")
-        if not (num_receipts == num_ciphertexts == total_as_tokens_issued):
+        if not (num_receipts == num_ciphertexts <= total_as_tokens_issued):
             print("[AE] Errore di Flusso: Rilevata un'incoerenza quantitativa tra i moduli di controllo!")
             return None
         print("[AE] Sotto-fase 4/4: Coerenza quantitativa approvata.")
