@@ -18,12 +18,23 @@ avvia l'applicazione di voto istanzia il proprio Client e ne esegue
 il bootstrap della fiducia (vedi 'bootstrap_client').
 """
 
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from pki import CertificationAuthority
 from entities import AutoritaElettorale, Urna, AuthServer, Client
 from election_config import ConfigurazioneElettorale, configurazione_demo
 from bulletin_board import BulletinBoard, VerbaleFinale
+
+# Directory radice in cui AutoritaElettorale, Urna e AuthServer generano
+# (tramite 'pki.genera_chiave_e_csr') le proprie chiavi private e CSR
+# di lavoro, in sottocartelle dedicate (rispettivamente 'AE', 'Urna',
+# 'AS': vedere i rispettivi '_dir_lavoro' in entities.py). Non va
+# confusa con la directory della CA ("ca/", contenente 'index.txt' e
+# 'serial'), che e' invece persistente tra un avvio e l'altro del
+# sistema e non viene toccata da questo modulo.
+DIRECTORY_PKI_RUNTIME = "pki_runtime"
 
 
 @dataclass
@@ -42,11 +53,93 @@ class SistemaVoto:
 
 PERCORSO_REGISTRO_ELETTORI_DEFAULT = "registro_elettori.json"
 
+
+def _pulisci_pki_runtime(
+    directory_pki_runtime: str = DIRECTORY_PKI_RUNTIME,
+    directory_ca: str = "ca",
+) -> None:
+    """
+    Prepara l'ambiente per una nuova sessione di voto eseguendo due
+    operazioni distinte ma entrambe necessarie prima che 'openssl ca'
+    possa emettere i certificati delle componenti server-side.
+
+    1) Svuota (o crea, se non esiste) la directory di lavoro
+       'pki_runtime/', usata da AutoritaElettorale, Urna e AuthServer
+       per le proprie chiavi private e CSR. Motivazione: 'openssl genrsa'
+       sovrascrive silenziosamente la chiave privata precedente senza
+       segnalare errore, lasciando su disco una CSR ancora firmata con
+       la vecchia chiave finche' non viene rigenerata nello stesso run;
+       partire da una directory pulita elimina questo rischio.
+
+    2) Azzera lo stato dell'indice della CA ('ca/index.txt' e il file
+       attributo 'ca/index.txt.attr') e riporta 'ca/serial' a '01'.
+       Motivazione: la CA e' un'infrastruttura permanente (creata una
+       tantum da terminale, non ricreata da questo modulo), mentre i
+       server di voto cambiano ad ogni sessione e usano CN fissi (es.
+       'CN=AE-UNIVERSITA-ENC'). Senza questo reset, dalla seconda
+       sessione in poi 'openssl ca' rifiuta l'emissione con:
+           "ERROR: There is already a certificate for /CN=..."
+       perche' 'index.txt' mantiene permanentemente le entry 'Valid'
+       della sessione precedente per lo stesso CN. Azzerare 'index.txt'
+       tra una sessione e l'altra e' semanticamente corretto: ogni
+       sessione di voto parte da uno stato della CA pulito, senza che
+       venga alterato il materiale crittografico permanente della CA
+       stessa (chiave privata e certificato self-signed, che restano
+       intatti in 'ca/private/' e 'ca/certs/').
+
+    Per sicurezza, prima di rimuovere qualsiasi cosa la funzione verifica
+    che i percorsi risolti non siano la radice del filesystem o la
+    directory corrente.
+    """
+    # -- 1. Pulizia di pki_runtime/ ---------------------------------------------
+    percorso = Path(directory_pki_runtime).resolve()
+    percorsi_non_sicuri = {
+        str(Path("/").resolve()),
+        str(Path(".").resolve()),
+        percorso.anchor,
+    }
+
+    if str(percorso) in percorsi_non_sicuri:
+        raise RuntimeError(
+            f"Percorso non sicuro per la pulizia di pki_runtime: '{percorso}'. "
+            "Operazione interrotta per evitare la cancellazione accidentale "
+            "di directory non previste."
+        )
+
+    if percorso.exists():
+        shutil.rmtree(percorso)
+    percorso.mkdir(parents=True, exist_ok=True)
+
+    # -- 2. Reset dello stato dell'indice della CA ------------------------------
+    percorso_ca = Path(directory_ca).resolve()
+
+    index_txt = percorso_ca / "index.txt"
+    index_attr = percorso_ca / "index.txt.attr"
+    serial_file = percorso_ca / "serial"
+
+    if index_txt.exists():
+        index_txt.write_text("", encoding="ascii")
+
+    # 'openssl ca' ricrea index.txt.attr autonomamente alla prima emissione;
+    # rimuoverlo evita che attributi della sessione precedente (es.
+    # 'unique_subject = yes') interferiscano con il nuovo avvio.
+    if index_attr.exists():
+        index_attr.unlink()
+
+    if serial_file.exists():
+        serial_file.write_text("01\n", encoding="ascii")
+
+
 def inizializza_sistema(
     percorso_registro_elettori: str = PERCORSO_REGISTRO_ELETTORI_DEFAULT,
 ) -> SistemaVoto:
     """
     Esegue per intero la Fase 1 del protocollo:
+        - pulizia/creazione della directory 'pki_runtime/' (chiavi
+          private e CSR di lavoro di AE, Urna e AS), per garantire che
+          ogni avvio parta da uno stato pulito e non lasci su disco
+          materiale crittografico di un run precedente (vedere
+          '_pulisci_pki_runtime' per i dettagli);
         - generazione delle chiavi RSA per AE (4096 bit, doppia coppia),
           Urna e AS (2048 bit, sola firma);
         - certificazione di tutte le chiavi pubbliche tramite la CA
@@ -61,12 +154,23 @@ def inizializza_sistema(
     riusabilita' dell'infrastruttura software (dati di sessione
     separati dal codice delle componenti core).
 
+    Nota: la directory della CA ('ca/', con 'index.txt' e 'serial') non
+    viene toccata da questa funzione. E' stato persistente della CA
+    d'Ateneo, creata una tantum da terminale; rilanciare piu' volte
+    'inizializza_sistema()' nella stessa demo continuera' quindi ad
+    accumulare nuovi certificati nell'indice della CA (uno per ogni
+    avvio), ma con chiavi private sempre fresche in 'pki_runtime/' e
+    senza il problema dei file di chiave/CSR sovrascritti silenziosamente
+    descritto in '_pulisci_pki_runtime'.
+
     Solleva FileNotFoundError o ValueError se il file del Registro_Elettori
     non esiste o non e' nel formato atteso (vedere
     'AuthServer.carica_registro_da_file').
 
     Ritorna un oggetto SistemaVoto con tutte le componenti pronte.
     """
+    _pulisci_pki_runtime(directory_ca="ca")
+
     ca = CertificationAuthority(directory_ca="ca")
 
     ae = AutoritaElettorale()
