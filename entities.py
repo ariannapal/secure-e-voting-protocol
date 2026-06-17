@@ -191,10 +191,7 @@ class AutoritaElettorale:
 
             1) per ogni tupla (T_i, C_i) scaricata, ricalcola
                L'_i = SHA256(T_i || C_i) e verifica che corrisponda
-               esattamente al ReceiptID pubblicato (in questa
-               implementazione il ReceiptID stesso e' gia' L_i, quindi
-               la verifica si riduce a un controllo di consistenza
-               della tupla scaricata: vedere nota sotto);
+               esattamente al ReceiptID pubblicato; 
             2) verifica la firma dell'Urna su ciascun batch pubblicato
                (incluso il numero di schede fittizie di padding
                dichiarato per quel batch);
@@ -213,26 +210,6 @@ class AutoritaElettorale:
         verifica che dovesse fallire, cosi' che l'AE possa interrompere
         immediatamente lo scrutinio, come prescritto dal WP2.
 
-        Nota implementativa: nel formato dati di questo sistema il
-        ReceiptID e' definito come ReceiptID = SHA256(token_hex || C),
-        dove 'token_hex' e' la rappresentazione hex del token T (non T
-        in chiaro). Il ricalcolo del punto (1) e' quindi implicito nel
-        fatto che le tuple scaricate dal BB sono proprio le coppie
-        (ReceiptID, ciphertext) e non (T, ciphertext): l'AE non ha
-        comunque alcun motivo di mettere in dubbio la corrispondenza,
-        dato che il controllo che conta davvero a questo livello e' la
-        rigenerazione della Merkle Root sull'intero insieme dei
-        ReceiptID pubblicati, eseguita al punto (3).
-
-        Nota sul padding: le schede fittizie inserite dall'Urna per
-        preservare l'anonymity set minimo (WP2, Fase 4) sono incluse
-        nelle foglie del Merkle Tree esattamente come i voti reali (la
-        loro presenza e' quindi coperta dalla verifica di integrita'
-        strutturale), ma il loro NUMERO totale, dichiarato batch per
-        batch e coperto dalla firma Sig_UE di ciascun batch, viene
-        sottratto dal conteggio prima del confronto con n_token: in
-        caso contrario il padding farebbe fallire sistematicamente il
-        controllo di coerenza quantitativa.
         """
         tuple_voti: List[Tuple[str, str]] = dati_bb["tuple_voti"]
         batch_pubblicati: List["BatchPubblicato"] = dati_bb["batch_pubblicati"]
@@ -666,11 +643,6 @@ class Urna:
         Ritorna True se il token e' valido e non era gia' stato
         utilizzato, False altrimenti.
 
-        Nota: questo metodo e' mantenuto per compatibilita' e per
-        scenari in cui si vuole registrare un token senza ancora
-        sottomettere un voto. La sottomissione effettiva del voto
-        (Fase 4) avviene tramite 'ricevi_voto', che esegue gli stessi
-        controlli sul token nel contesto della ricezione del payload.
         """
         h_t_hex = token.hash_token.hex()
         if h_t_hex in self._elenco_token_usati:
