@@ -130,16 +130,22 @@ def esegui_fase5(sistema: SistemaVoto) -> VerbaleFinale:
     Orchestra la Fase 5 (Scrutinio e decifrazione dei voti) per
     l'intero sistema, secondo la sequenza descritta nel WP2:
 
-        1) l'Urna pubblica sul Bulletin Board l'unico batch contenente
-           tutti i voti raccolti durante la finestra elettorale;
-        2) l'Urna chiude la sessione elettorale, calcolando e
-           pubblicando la Merkle Root finale firmata;
+        1) durante la finestra di voto, l'Urna ha gia' pubblicato sul
+           Bulletin Board, in modo incrementale e automatico, i batch
+           per i quali sono scattati i trigger di soglia (B_min) o di
+           timeout (Delta_max) (vedere 'Urna.ricevi_voto' e
+           'Urna.verifica_e_pubblica_batch_se_necessario');
+        2) l'Urna chiude la sessione elettorale: pubblica l'eventuale
+           ultimo batch residuo rimasto in coda (applicando il padding
+           con schede fittizie se sotto soglia B_min), poi calcola e
+           pubblica la Merkle Root finale firmata;
         3) l'AS pubblica sul Bulletin Board l'attestazione firmata sul
            numero totale di token emessi durante la sessione;
         4) l'Autorita' Elettorale scarica i dati dal Bulletin Board,
-           ne verifica l'integrita' e la coerenza quantitativa,
-           decifra e valida i voti, conta le preferenze e pubblica il
-           verbale finale firmato.
+           ne verifica l'integrita' e la coerenza quantitativa
+           (escludendo dal conteggio il padding dichiarato pubblicamente
+           dall'Urna), decifra e valida i voti, conta le preferenze e
+           pubblica il verbale finale firmato.
 
     Imposta 'sistema.elezione_chiusa = True' e 'sistema.verbale' con
     il risultato, per essere consultati successivamente (es. dalla
@@ -149,8 +155,8 @@ def esegui_fase5(sistema: SistemaVoto) -> VerbaleFinale:
     coerenza quantitativa durante la verifica (lo scrutinio viene
     interrotto e nessun verbale viene pubblicato).
     """
-    # --- Passo 1-2: pubblicazione del batch e chiusura da parte dell'Urna ----------
-    sistema.urna.pubblica_batch_su_bb(sistema.bb, batch_id="batch-1")
+    # --- Passo 1-2: chiusura dell'Urna (pubblica l'ultimo batch residuo,
+    # con padding se necessario, e poi la chiusura firmata) -------------------
     sistema.urna.chiudi_elezione(sistema.bb, election_id=sistema.election_id)
 
     # --- Passo 3: attestazione dell'AS sul numero di token emessi ------------------

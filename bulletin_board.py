@@ -34,12 +34,24 @@ class BatchPubblicato:
     Singolo batch pubblicato dall'Urna Elettronica sul Bulletin Board:
 
         BB <- BB U { batch_id, [(L_j, C_j), ...], R_Merkle, Timestamp, Sig_UE }
+
+    Il campo 'numero_dummy' dichiara quante delle tuple incluse in
+    questo batch sono schede fittizie di padding (inserite per
+    raggiungere la cardinalita' minima B_min quando il batch viene
+    pubblicato per timeout o per chiusura sotto soglia, secondo il
+    WP2). Il numero di dummy e' reso pubblico e incluso nel perimetro
+    della firma Sig_UE: questo non rivela QUALI tuple siano fittizie
+    (l'anonimato del singolo voto reale resta protetto), ma permette
+    all'Autorita' Elettorale di escludere correttamente il padding dal
+    controllo di coerenza quantitativa rispetto a n_token, senza dover
+    fare affidamento su un canale diverso dal Bulletin Board.
     """
     batch_id: str
     tuple_voti: List[Tuple[str, str]]   # [(ReceiptID_hex, ciphertext_hex), ...]
     radice_merkle_hex: str
     timestamp: float
     firma_ue: bytes
+    numero_dummy: int = 0
 
 
 @dataclass
@@ -160,6 +172,15 @@ class BulletinBoard:
     def tutti_i_receipt_id(self) -> List[str]:
         """Restituisce l'elenco ordinato di tutti i ReceiptID pubblicati."""
         return [receipt_id for receipt_id, _ in self.tutte_le_tuple()]
+
+    def totale_dummy_pubblicati(self) -> int:
+        """
+        Somma dei 'numero_dummy' dichiarati su tutti i batch pubblicati:
+        rappresenta il totale delle schede fittizie di padding incluse
+        nell'intero registro, da escludere dal controllo di coerenza
+        quantitativa rispetto a n_token (WP2, Fase 5).
+        """
+        return sum(batch.numero_dummy for batch in self.batch_pubblicati)
 
     def cerca_batch_per_receipt_id(self, receipt_id_hex: str) -> Optional[BatchPubblicato]:
         """Trova il batch che contiene un dato ReceiptID, se presente."""

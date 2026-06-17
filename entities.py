@@ -174,6 +174,7 @@ class AutoritaElettorale:
 
         return {
             "tuple_voti": bb.tutte_le_tuple(),
+            "batch_pubblicati": bb.batch_pubblicati,
             "chiusura": bb.chiusura,
             "attestazione_token": bb.attestazione_token,
         }
@@ -194,14 +195,19 @@ class AutoritaElettorale:
                implementazione il ReceiptID stesso e' gia' L_i, quindi
                la verifica si riduce a un controllo di consistenza
                della tupla scaricata: vedere nota sotto);
-            2) ricalcola la Merkle Root a partire dalle foglie scaricate
+            2) verifica la firma dell'Urna su ciascun batch pubblicato
+               (incluso il numero di schede fittizie di padding
+               dichiarato per quel batch);
+            3) ricalcola la Merkle Root a partire dalle foglie scaricate
                e la confronta con R_finale pubblicata dall'Urna;
-            3) verifica la firma dell'Urna sulla chiusura:
+            4) verifica la firma dell'Urna sulla chiusura:
                    Verify(PK_UE, Sig_UE(election_id||R_finale||ts)) = true
-            4) verifica la firma dell'AS sull'attestazione:
+            5) verifica la firma dell'AS sull'attestazione:
                    Verify(PK_AS, Sig_AS(n_token)) = true
-            5) verifica la coerenza quantitativa:
-                   |{L_i}| == |{C_i}| <= n_token
+            6) verifica la coerenza quantitativa, escludendo dal
+               conteggio le schede fittizie di padding dichiarate
+               pubblicamente dall'Urna sui singoli batch:
+                   |{L_i}| - n_dummy_totali == |{C_i}| - n_dummy_totali <= n_token
 
         Solleva ValueError con un messaggio specifico per ciascuna
         verifica che dovesse fallire, cosi' che l'AE possa interrompere
@@ -216,15 +222,43 @@ class AutoritaElettorale:
         comunque alcun motivo di mettere in dubbio la corrispondenza,
         dato che il controllo che conta davvero a questo livello e' la
         rigenerazione della Merkle Root sull'intero insieme dei
-        ReceiptID pubblicati, eseguita al punto (2).
+        ReceiptID pubblicati, eseguita al punto (3).
+
+        Nota sul padding: le schede fittizie inserite dall'Urna per
+        preservare l'anonymity set minimo (WP2, Fase 4) sono incluse
+        nelle foglie del Merkle Tree esattamente come i voti reali (la
+        loro presenza e' quindi coperta dalla verifica di integrita'
+        strutturale), ma il loro NUMERO totale, dichiarato batch per
+        batch e coperto dalla firma Sig_UE di ciascun batch, viene
+        sottratto dal conteggio prima del confronto con n_token: in
+        caso contrario il padding farebbe fallire sistematicamente il
+        controllo di coerenza quantitativa.
         """
         tuple_voti: List[Tuple[str, str]] = dati_bb["tuple_voti"]
+        batch_pubblicati: List["BatchPubblicato"] = dati_bb["batch_pubblicati"]
         chiusura: "ChiusuraElezione" = dati_bb["chiusura"]
         attestazione: "AttestazioneTokenAS" = dati_bb["attestazione_token"]
 
         foglie = [receipt_id for receipt_id, _ in tuple_voti]
 
-        # --- Verifica 2: rigenerazione della Merkle Root --------------------------
+        # --- Verifica 2: firma dell'Urna su ciascun batch pubblicato ---------------
+        for batch in batch_pubblicati:
+            messaggio_batch = (
+                batch.batch_id.encode()
+                + batch.radice_merkle_hex.encode()
+                + str(batch.timestamp).encode()
+                + str(batch.numero_dummy).encode()
+            )
+            firma_batch_valida = cu.rsa_pss_verify(
+                pk_ue_sig, messaggio_batch, batch.firma_ue
+            )
+            if not firma_batch_valida:
+                raise ValueError(
+                    f"Firma dell'Urna Elettronica sul batch '{batch.batch_id}' "
+                    "non valida: scrutinio interrotto."
+                )
+
+        # --- Verifica 3: rigenerazione della Merkle Root --------------------------
         radice_ricalcolata = calcola_radice_merkle(foglie)
         if radice_ricalcolata != chiusura.radice_finale_hex:
             raise ValueError(
@@ -232,7 +266,7 @@ class AutoritaElettorale:
                 "dall'Urna: integrita' dei dati compromessa. Scrutinio interrotto."
             )
 
-        # --- Verifica 3: firma dell'Urna sulla chiusura ----------------------------
+        # --- Verifica 4: firma dell'Urna sulla chiusura ----------------------------
         corpo_chiusura = (
             chiusura.election_id.encode()
             + chiusura.radice_finale_hex.encode()
@@ -248,7 +282,7 @@ class AutoritaElettorale:
                 "scrutinio interrotto."
             )
 
-        # --- Verifica 4: firma dell'AS sull'attestazione n_token -------------------
+        # --- Verifica 5: firma dell'AS sull'attestazione n_token -------------------
         firma_as_valida = cu.rsa_pss_verify(
             pk_as_sig,
             str(attestazione.n_token).encode("utf-8"),
@@ -260,7 +294,9 @@ class AutoritaElettorale:
                 "non valida: scrutinio interrotto."
             )
 
-        # --- Verifica 5: coerenza quantitativa --------------------------------------
+        # --- Verifica 6: coerenza quantitativa (escluso il padding dichiarato) -----
+        n_dummy_totali = sum(batch.numero_dummy for batch in batch_pubblicati)
+
         n_receipt = len(foglie)
         n_ciphertext = len(tuple_voti)
         if n_receipt != n_ciphertext:
@@ -268,11 +304,19 @@ class AutoritaElettorale:
                 "Numero di ReceiptID e numero di ciphertext non coincidono: "
                 "scrutinio interrotto."
             )
-        if n_receipt > attestazione.n_token:
+
+        n_receipt_reali = n_receipt - n_dummy_totali
+        if n_receipt_reali < 0:
             raise ValueError(
-                f"Numero di voti pubblicati ({n_receipt}) superiore al numero "
-                f"di token emessi dall'AS ({attestazione.n_token}): "
-                "possibile iniezione di voti non autorizzati. Scrutinio interrotto."
+                "Numero di schede fittizie dichiarate superiore al numero "
+                "totale di tuple pubblicate: dati incoerenti. Scrutinio interrotto."
+            )
+        if n_receipt_reali > attestazione.n_token:
+            raise ValueError(
+                f"Numero di voti reali pubblicati ({n_receipt_reali}, esclusi "
+                f"{n_dummy_totali} di padding) superiore al numero di token "
+                f"emessi dall'AS ({attestazione.n_token}): possibile iniezione "
+                "di voti non autorizzati. Scrutinio interrotto."
             )
 
     # -- Fase 5: decifratura, validazione e conteggio --------------------------------
@@ -453,18 +497,45 @@ class Urna:
     """
     Urna Elettronica (UE).
 
-    Riceve esclusivamente voti cifrati (non implementato in questa
-    versione di base) e, in conformita' al proprio ruolo architetturale
-    (che non prevede la decifratura di dati riservati), genera in Fase 1
-    soltanto una coppia di chiavi dedicata alla firma digitale (RSA-PSS),
-    utilizzata per firmare ricevute e Merkle Root.
+    Riceve esclusivamente voti cifrati e, in conformita' al proprio
+    ruolo architetturale (che non prevede la decifratura di dati
+    riservati), genera in Fase 1 soltanto una coppia di chiavi dedicata
+    alla firma digitale (RSA-PSS), utilizzata per firmare ricevute e
+    Merkle Root.
 
     Mantiene inoltre uno stato persistente dei token pseudonimi
     presentati dagli elettori, per poter rifiutare eventuali duplicati
     (anti-double-voting) nelle fasi successive.
+
+    Implementa il meccanismo di pubblicazione a "batching ibrido"
+    descritto nel WP2 (Fase 4): un batch viene pubblicato sul Bulletin
+    Board non appena si verifica almeno una delle condizioni:
+
+        - Soglia minima di cardinalita' B_min raggiunta nel batch
+          corrente (di default 50 voti), per garantire una dimensione
+          minima dell'anonymity set;
+        - Finestra temporale massima Delta_max trascorsa dall'apertura
+          del batch corrente (di default 15 minuti), per evitare che i
+          voti restino bloccati indefinitamente nella coda interna nei
+          periodi di bassa affluenza;
+        - Chiusura della sessione elettorale.
+
+    Se al momento della pubblicazione forzata (per timeout o per
+    chiusura) il batch contiene meno di B_min voti reali, l'Urna
+    applica un padding tramite schede fittizie (dummy), strutturalmente
+    identiche a voti reali ma con ciphertext non decifrabile, fino al
+    raggiungimento della soglia, in modo da non esporre la cardinalita'
+    reale del batch e preservare l'anonymity set minimo.
     """
 
     BIT_SIZE_UE = 2048
+
+    # Soglia minima di cardinalita' di un batch (anonymity set minimo).
+    B_MIN = 5
+
+    # Finestra temporale massima (in secondi) prima della pubblicazione
+    # forzata del batch corrente, anche sotto soglia.
+    DELTA_MAX_SECONDI = 15 * 60
 
     def __init__(self):
         self.id = "UE-URNA"
@@ -484,12 +555,26 @@ class Urna:
         self._token_ricevuti: Dict[str, TokenVoto] = {}
 
         # Coda interna persistente e append-only dei voti cifrati accettati,
-        # non ancora pubblicati a batch sul Bulletin Board (Fase 4).
+        # NON ancora pubblicati a batch sul Bulletin Board (Fase 4): e'
+        # il "batch corrente" in fase di accumulo.
         self._coda_interna: list = []
 
         # Ricevute emesse, indicizzate per ReceiptID (hex), per eventuali
         # consultazioni successive (es. dalla CLI).
         self._ricevute_emesse: Dict[str, "Ricevuta"] = {}
+
+        # Timestamp di apertura del batch corrente: si azzera ad ogni
+        # nuova pubblicazione. Usato per il trigger Delta_max.
+        self._timestamp_apertura_batch: float = time.time()
+
+        # Contatore monotono per generare batch_id incrementali
+        # ("batch-1", "batch-2", ...).
+        self._numero_batch_pubblicati: int = 0
+
+        # Sessione chiusa: dopo la chiusura non si accettano piu' voti
+        # ne' si apre un nuovo batch (l'eventuale coda residua viene
+        # svuotata da chiudi_elezione tramite l'ultimo padding/pubblicazione).
+        self._sessione_chiusa: bool = False
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """Ottiene il certificato X.509 per la propria chiave di firma."""
@@ -539,7 +624,12 @@ class Urna:
 
     # -- Fase 4: ricezione, registrazione e rilascio della ricevuta -----------------
 
-    def ricevi_voto(self, payload: PayloadVoto, pk_as: rsa.RSAPublicKey) -> Ricevuta:
+    def ricevi_voto(
+        self,
+        payload: PayloadVoto,
+        pk_as: rsa.RSAPublicKey,
+        bb: Optional["BulletinBoard"] = None,
+    ) -> Ricevuta:
         """
         Riceve dal Client il payload di voto Payload = {C, T, Sig_AS(T)}
         ed esegue, nell'ordine, i controlli descritti in Fase 4:
@@ -552,12 +642,23 @@ class Urna:
                persistente e append-only;
             4) calcolo del ReceiptID = SHA256(T || C) e generazione
                della ricevuta crittografica firmata dall'Urna con
-               RSA-PSS: Sig_UE(ReceiptID || Timestamp).
+               RSA-PSS: Sig_UE(ReceiptID || Timestamp);
+            5) se viene fornito il Bulletin Board 'bb', verifica se i
+               trigger di batching (soglia B_min o timeout Delta_max)
+               sono scattati e, in tal caso, pubblica immediatamente il
+               batch corrente (meccanismo di "batching ibrido" del WP2).
 
         Solleva ValueError se il payload viene rifiutato (token non
-        autentico oppure gia' utilizzato), riportando il motivo.
+        autentico oppure gia' utilizzato, oppure sessione gia' chiusa),
+        riportando il motivo.
         Ritorna la Ricevuta in caso di accettazione del voto.
         """
+        if self._sessione_chiusa:
+            raise ValueError(
+                "La sessione elettorale e' chiusa: l'Urna non accetta piu' "
+                "nuovi pacchetti di voto."
+            )
+
         h_t = cu.sha256(bytes.fromhex(payload.token_hex))
         h_t_hex = h_t.hex()
 
@@ -599,27 +700,126 @@ class Urna:
             firma_ue=firma_ue,
         )
         self._ricevute_emesse[receipt_id_hex] = ricevuta
+
+        # --- Trigger di batching (WP2, Fase 4): dopo ogni voto accettato,
+        # verifica se e' stata raggiunta la soglia B_min o se e' scaduta
+        # la finestra Delta_max dall'apertura del batch corrente. In tal
+        # caso, pubblica immediatamente il batch sul Bulletin Board, se
+        # disponibile (passato facoltativamente dal chiamante).
+        if bb is not None:
+            self.verifica_e_pubblica_batch_se_necessario(bb)
+
         return ricevuta
 
     def numero_voti_in_coda(self) -> int:
-        """Numero di voti attualmente registrati nella coda interna (non ancora pubblicati a batch)."""
+        """Numero di voti REALI attualmente registrati nella coda interna (batch corrente, non ancora pubblicato)."""
         return len(self._coda_interna)
 
-    # -- Fase 5: chiusura dell'urna e pubblicazione sul Bulletin Board --------------
+    # -- Fase 4: meccanismo di batching ibrido (B_min, Delta_max, chiusura) ---------
 
-    def pubblica_batch_su_bb(self, bb: "BulletinBoard", batch_id: str = "batch-1") -> BatchPubblicato:
-        """
-        Pubblica sul Bulletin Board un unico batch contenente tutte le
-        tuple (ReceiptID, ciphertext) attualmente presenti nella coda
-        interna, insieme alla Merkle Root del batch e alla relativa
-        firma dell'Urna.
+    def _tempo_trascorso_batch_corrente(self) -> float:
+        """Secondi trascorsi dall'apertura del batch corrente."""
+        return time.time() - self._timestamp_apertura_batch
 
-        In questa implementazione di base la pubblicazione avviene in
-        un solo batch comprensivo di tutti i voti raccolti finora; nulla
-        impedisce, in un'estensione futura, di richiamare questo metodo
-        piu' volte durante la finestra elettorale per pubblicare batch
-        incrementali (come previsto concettualmente dal WP2).
+    def _timeout_scaduto(self) -> bool:
+        """True se e' trascorsa la finestra Delta_max dall'apertura del batch corrente."""
+        return self._tempo_trascorso_batch_corrente() >= self.DELTA_MAX_SECONDI
+
+    def _soglia_raggiunta(self) -> bool:
+        """True se il batch corrente ha raggiunto la cardinalita' minima B_min."""
+        return len(self._coda_interna) >= self.B_MIN
+
+    def verifica_e_pubblica_batch_se_necessario(self, bb: "BulletinBoard") -> Optional[BatchPubblicato]:
         """
+        Controlla se uno dei due trigger "in corsa" del WP2 e' scattato
+        per il batch corrente:
+
+            - Soglia minima di cardinalita' (B_min) raggiunta;
+            - Finestra temporale massima (Delta_max) trascorsa
+              dall'apertura del batch corrente.
+
+        Se il trigger e' la sola soglia B_min, il batch viene pubblicato
+        senza necessita' di padding (e' gia' grande almeno B_min).
+        Se il trigger e' il timeout e il batch e' sotto soglia, viene
+        applicato il padding con schede fittizie prima della
+        pubblicazione, per preservare l'anonymity set minimo.
+
+        Non fa nulla (ritorna None) se nessun trigger e' scattato, o se
+        il batch corrente e' vuoto, o se la sessione e' gia' chiusa
+        (la pubblicazione dell'ultimo batch residuo alla chiusura e'
+        gestita esclusivamente da 'chiudi_elezione').
+        """
+        if self._sessione_chiusa:
+            return None
+        if not self._coda_interna:
+            return None
+
+        if self._soglia_raggiunta():
+            return self._pubblica_batch_corrente(bb, applica_padding=False)
+
+        if self._timeout_scaduto():
+            return self._pubblica_batch_corrente(bb, applica_padding=True)
+
+        return None
+
+    def _genera_voto_fittizio(self) -> dict:
+        """
+        Genera una scheda fittizia (dummy) strutturalmente identica a un
+        voto reale: stessa forma della tupla (ReceiptID, ciphertext), ma
+        con un token e un ciphertext puramente casuali, semanticamente
+        nulli e non decifrabili in modo significativo dall'Autorita'
+        Elettorale (essendo bytes casuali e non un vero RSA-OAEP di un
+        messaggio valido, la decifratura in Fase 5 fallira' o produrra'
+        un messaggio che non supera la validazione, finendo comunque
+        contato come voto non valido, mai come preferenza).
+
+        Il padding e' usato esclusivamente per occultare la cardinalita'
+        reale di un batch sotto soglia al momento della pubblicazione
+        forzata (timeout o chiusura), secondo quanto previsto nel WP2.
+        """
+        token_dummy_hex = cu.genera_valore_casuale(32).hex()
+        # Ciphertext dummy della stessa lunghezza tipica di un blocco
+        # RSA-OAEP a 4096 bit (512 byte), ma con contenuto casuale: non
+        # corrisponde alla cifratura di alcun messaggio valido.
+        ciphertext_dummy_hex = cu.genera_valore_casuale(512).hex()
+        receipt_id_dummy_hex = calcola_receipt_id(token_dummy_hex, ciphertext_dummy_hex)
+        return {
+            "token_hex": token_dummy_hex,
+            "ciphertext_hex": ciphertext_dummy_hex,
+            "receipt_id_hex": receipt_id_dummy_hex,
+            "timestamp": time.time(),
+            "dummy": True,
+        }
+
+    def _applica_padding_se_necessario(self) -> int:
+        """
+        Se il batch corrente (coda interna) e' sotto la soglia B_min,
+        inserisce schede fittizie fino al raggiungimento della soglia.
+        Ritorna il numero di schede fittizie effettivamente inserite
+        (0 se il batch era gia' a soglia o sopra soglia).
+        """
+        mancanti = self.B_MIN - len(self._coda_interna)
+        if mancanti <= 0:
+            return 0
+        for _ in range(mancanti):
+            self._coda_interna.append(self._genera_voto_fittizio())
+        return mancanti
+
+    def _pubblica_batch_corrente(self, bb: "BulletinBoard", applica_padding: bool) -> BatchPubblicato:
+        """
+        Pubblica sul Bulletin Board il batch corrente (contenuto della
+        coda interna), applicando preventivamente il padding con
+        schede fittizie se richiesto e se il batch e' sotto soglia, poi
+        svuota la coda interna e riapre un nuovo batch (nuovo timestamp
+        di apertura, nuovo batch_id incrementale).
+        """
+        numero_dummy_inseriti = 0
+        if applica_padding:
+            numero_dummy_inseriti = self._applica_padding_se_necessario()
+
+        self._numero_batch_pubblicati += 1
+        batch_id = f"batch-{self._numero_batch_pubblicati}"
+
         tuple_voti = [
             (voto["receipt_id_hex"], voto["ciphertext_hex"])
             for voto in self._coda_interna
@@ -629,7 +829,10 @@ class Urna:
         timestamp = time.time()
 
         messaggio_da_firmare = (
-            batch_id.encode() + radice_merkle_hex.encode() + str(timestamp).encode()
+            batch_id.encode()
+            + radice_merkle_hex.encode()
+            + str(timestamp).encode()
+            + str(numero_dummy_inseriti).encode()
         )
         firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
 
@@ -639,30 +842,92 @@ class Urna:
             radice_merkle_hex=radice_merkle_hex,
             timestamp=timestamp,
             firma_ue=firma_ue,
+            numero_dummy=numero_dummy_inseriti,
         )
         bb.pubblica_batch(batch)
+
+        # Il batch e' stato pubblicato: si svuota la coda e si riapre
+        # un nuovo batch corrente con timestamp di apertura fresco.
+        self._coda_interna = []
+        self._timestamp_apertura_batch = time.time()
+
         return batch
+
+    def pubblica_batch_su_bb(self, bb: "BulletinBoard", forza: bool = False) -> Optional[BatchPubblicato]:
+        """
+        Punto di ingresso esplicito (es. da CLI/amministrazione) per
+        forzare la pubblicazione del batch corrente indipendentemente
+        dai trigger automatici, applicando il padding se il batch e'
+        sotto soglia B_min. Utile per scenari di test o per chiudere
+        manualmente un batch prima della chiusura ufficiale.
+
+        Se 'forza' e' False e nessun trigger (soglia/timeout) e'
+        scattato, non pubblica nulla e ritorna None.
+        """
+        if not self._coda_interna:
+            return None
+        if forza:
+            return self._pubblica_batch_corrente(bb, applica_padding=True)
+        return self.verifica_e_pubblica_batch_se_necessario(bb)
 
     def chiudi_elezione(self, bb: "BulletinBoard", election_id: str) -> ChiusuraElezione:
         """
         Esegue la chiusura della sessione elettorale (Fase 5):
 
-            1) interrompe concettualmente l'accettazione di nuovi
-               pacchetti (a partire da questa chiamata, l'Urna non deve
-               piu' essere alimentata con nuovi voti: il controllo
-               applicativo di tale vincolo e' demandato al chiamante,
-               es. la CLI, che non deve invocare 'ricevi_voto' dopo la
-               chiusura);
-            2) calcola la Merkle Root finale a partire dall'intero
+            1) interrompe l'accettazione di nuovi pacchetti (da questo
+               momento 'ricevi_voto' rifiuta qualsiasi payload, vedere
+               '_sessione_chiusa');
+            2) pubblica l'ultimo batch residuo eventualmente presente
+               nella coda interna, applicando il padding con schede
+               fittizie se sotto soglia B_min (WP2: "se l'ultimo batch
+               rimasto in coda contiene un numero di schede inferiore a
+               B_min, l'Urna applica la medesima strategia di
+               padding");
+            3) calcola la Merkle Root finale a partire dall'intero
                insieme delle foglie (ReceiptID) pubblicate sul Bulletin
-               Board fino a questo momento;
-            3) firma e pubblica la chiusura sul Bulletin Board:
+               Board fino a questo momento (su tutti i batch, incluso
+               l'ultimo appena pubblicato);
+            4) firma e pubblica la chiusura sul Bulletin Board:
 
                 BB <- BB U { election_id, R_finale, timestamp_chiusura, Sig_UE }
 
                con
                 Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
         """
+        self._sessione_chiusa = True
+
+        # Pubblicazione forzata dell'ultimo batch residuo, con padding
+        # se sotto soglia, come previsto dal WP2 per la chiusura.
+        if self._coda_interna:
+            self._numero_batch_pubblicati += 1
+            batch_id = f"batch-{self._numero_batch_pubblicati}"
+            numero_dummy_inseriti = self._applica_padding_se_necessario()
+
+            tuple_voti = [
+                (voto["receipt_id_hex"], voto["ciphertext_hex"])
+                for voto in self._coda_interna
+            ]
+            foglie = [receipt_id for receipt_id, _ in tuple_voti]
+            radice_merkle_hex = calcola_radice_merkle(foglie)
+            timestamp = time.time()
+            messaggio_da_firmare = (
+                batch_id.encode()
+                + radice_merkle_hex.encode()
+                + str(timestamp).encode()
+                + str(numero_dummy_inseriti).encode()
+            )
+            firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
+            batch = BatchPubblicato(
+                batch_id=batch_id,
+                tuple_voti=tuple_voti,
+                radice_merkle_hex=radice_merkle_hex,
+                timestamp=timestamp,
+                firma_ue=firma_ue,
+                numero_dummy=numero_dummy_inseriti,
+            )
+            bb.pubblica_batch(batch)
+            self._coda_interna = []
+
         foglie_finali = bb.tutti_i_receipt_id()
         radice_finale_hex = calcola_radice_merkle(foglie_finali)
         timestamp_chiusura = time.time()
@@ -689,8 +954,10 @@ class Urna:
         return (
             f"Urna(id={self.id}, certificata={self.cert_sig is not None}, "
             f"token_registrati={len(self._token_ricevuti)}, "
-            f"voti_in_coda={len(self._coda_interna)}, "
-            f"ricevute_emesse={len(self._ricevute_emesse)})"
+            f"voti_in_coda(batch_corrente)={len(self._coda_interna)}, "
+            f"batch_pubblicati={self._numero_batch_pubblicati}, "
+            f"ricevute_emesse={len(self._ricevute_emesse)}, "
+            f"sessione_chiusa={self._sessione_chiusa})"
         )
 
     def __repr__(self) -> str:
@@ -1062,6 +1329,7 @@ class Client:
         candidato: Optional[str],
         urna: "Urna",
         configurazione: ConfigurazioneElettorale,
+        bb: Optional["BulletinBoard"] = None,
     ) -> Ricevuta:
         """
         Implementa per intero la Fase 3 e la consegna del voto descritta
@@ -1082,7 +1350,11 @@ class Client:
                    Payload = { C, T, Sig_AS(T) }
             5) Invio del payload all'Urna Elettronica tramite il
                metodo 'ricevi_voto' (che modella il canale HTTPS/TLS
-               Client -> UE), ottenendo la Ricevuta crittografica.
+               Client -> UE), ottenendo la Ricevuta crittografica. Se
+               viene fornito 'bb' (il Bulletin Board), la ricezione del
+               voto puo' innescare automaticamente, lato Urna, la
+               pubblicazione del batch corrente (trigger di soglia
+               B_min o di timeout Delta_max, WP2 Fase 4).
 
         Precondizioni: il Client deve avere completato il bootstrap
         della fiducia (fiducia_inizializzata) ed avere ottenuto un
@@ -1138,7 +1410,7 @@ class Client:
         )
 
         # --- Passo 5: invio del payload all'Urna (canale HTTPS/TLS modellato) ----
-        ricevuta = urna.ricevi_voto(payload, pk_as=self.pk_as_sig)
+        ricevuta = urna.ricevi_voto(payload, pk_as=self.pk_as_sig, bb=bb)
 
         # Aggiornamento dello stato locale del Client.
         self.ultimo_messaggio = messaggio
