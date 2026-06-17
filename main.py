@@ -19,14 +19,6 @@ interattivo, che riflettono i ruoli del protocollo WP2:
         Fase 3/4      – Preparazione voto (RSA-OAEP), invio all'Urna, ricevuta
         Verifica      – Controllo locale token e ricevuta crittografica
 
-Separazione identita' / voto (WP2, Pseudo-anonimato):
-    - Lo student_id viene inserito UNA SOLA VOLTA allo sportello elettore,
-      esclusivamente per il controllo nel Registro_Elettori (Fase 2).
-    - Dalla Fase 3 in poi l'elettore opera attraverso il token pseudonimo T:
-      l'Urna non conosce e non ha bisogno di conoscere chi sta votando.
-    - Lo sportello amministrativo non interagisce mai con identita' reali
-      degli elettori: gestisce solo strutture aggregate (urna, BB, verbale).
-
 """
 
 import sys
@@ -43,7 +35,7 @@ class StatoSistema:
     """
     Contenitore dello stato globale condiviso tra i due sportelli.
     In un sistema reale le componenti server-side (ae, urna, auth_server, bb)
-    sarebbero processi separati raggiungibili via rete; qui condividono la
+    sarebbero processi separati, qui condividono la
     stessa memoria di processo perche' l'intera simulazione e' locale.
     """
     def __init__(self):

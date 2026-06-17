@@ -1,6 +1,4 @@
 """
-merkle.py
----------
 Implementazione del Merkle Tree usato dall'Urna Elettronica per
 calcolare la radice (R_Merkle / R_finale) a partire dall'elenco
 ordinato delle foglie L_i = SHA256(T_i || C_i), come descritto nel
@@ -9,14 +7,7 @@ WP2 (Fase 4 e Fase 5).
 Il Merkle Tree e' binario: ad ogni livello le foglie/nodi vengono
 accoppiate e concatenate prima di essere hashate per produrre il
 livello superiore. Se un livello ha un numero dispari di nodi,
-l'ultimo nodo viene duplicato (padding), convenzione comune che
-mantiene l'albero ben definito senza alterare l'insieme logico delle
-foglie originarie.
-
-Le foglie sono fornite e trattate come stringhe esadecimali (gli
-stessi ReceiptID_hex pubblicati sul Bulletin Board), cosi' che Urna,
-Autorita' Elettorale ed eventuali osservatori esterni calcolino
-esattamente lo stesso valore a partire dai medesimi dati pubblici.
+l'ultimo nodo viene duplicato (padding).
 """
 
 from __future__ import annotations
@@ -44,8 +35,7 @@ def calcola_radice_merkle(foglie_hex: List[str]) -> str:
         R = Root(L_1, L_2, ..., L_m)
 
     Se l'elenco e' vuoto, la radice e' definita come l'hash della
-    stringa vuota (convenzione che evita di dover gestire un caso
-    speciale "albero assente" nei confronti successivi).
+    stringa vuota.
     """
     if not foglie_hex:
         return cu.sha256_hex(b"")
@@ -100,7 +90,7 @@ def costruisci_proof(foglie_hex: List[str], indice: int) -> Optional[MerkleProof
     Costruisce la Merkle Proof per la foglia in posizione 'indice'
     dell'elenco 'foglie_hex'. Ritorna None se l'indice non e' valido.
 
-    Utile per consentire a un elettore di verificare che il proprio
+    Consente a un elettore di verificare che il proprio
     ReceiptID sia effettivamente incluso nella Merkle Root pubblicata,
     senza dover scaricare l'intero elenco delle foglie.
     """

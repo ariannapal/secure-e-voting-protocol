@@ -82,13 +82,7 @@ def _esegui(comando: list[str]) -> subprocess.CompletedProcess:
 class Certificato:
     """
     Rappresenta un certificato X.509 reale emesso da OpenSSL, gia'
-    caricato in memoria. A differenza della precedente implementazione
-    "in Python puro", qui i campi non sono ricostruiti a mano: vengono
-    letti direttamente dal certificato PEM tramite 'cryptography.x509'.
-
-    Il campo 'percorso_pem' resta disponibile per chi debba ri-passare
-    il file a un comando OpenSSL (es. 'openssl verify' a scopo di
-    ispezione manuale, non usato dal codice applicativo).
+    caricato in memoria.
     """
     percorso_pem: str
     oggetto_x509: x509.Certificate
@@ -231,12 +225,6 @@ def genera_chiave_e_csr(
     relativa CSR auto-firmata con quella stessa chiave privata
     (dimostrazione di possesso, WP2: firma_x = Sig(SK_x, Hash(CSR_x))).
 
-    Comandi eseguiti (analoghi a quelli di 'user_context' per i
-    certificati finali, qui senza CA Intermedia):
-
-        openssl genrsa -out <chiave>.key.pem <bit_size>
-        openssl req -new -key <chiave>.key.pem -out <csr>.csr.pem -subj "/CN=<common_name>"
-
     Ritorna la coppia (percorso_chiave_privata, percorso_csr), entrambi
     come stringhe di percorso su disco.
     """
@@ -266,10 +254,6 @@ def carica_chiave_privata(percorso_chiave_pem: str) -> rsa.RSAPrivateKey:
     """
     Ricarica in memoria, tramite 'cryptography', una chiave privata RSA
     precedentemente generata da OpenSSL su disco (PEM, non cifrata).
-    Necessario perche' tutte le operazioni applicative successive
-    (RSA-OAEP per la cifratura del voto, RSA-PSS per le firme su
-    token/ricevute/batch/verbale) sono gestite da crypto_utils.py
-    tramite oggetti 'cryptography', non da OpenSSL.
     """
     dati = Path(percorso_chiave_pem).read_bytes()
     return serialization.load_pem_private_key(dati, password=None)
@@ -287,18 +271,8 @@ def verifica_certificato_offline(
     X.509 sia stato effettivamente firmato dalla CA d'Ateneo,
     conoscendo soltanto PK_CA (preventivamente cablata nel Client).
 
-    OpenSSL firma i certificati X.509 con RSA-PKCS#1v1.5 (non con
-    RSA-PSS, a differenza delle firme applicative del WP2 su
-    token/ricevute/verbale, che restano RSA-PSS e sono gestite da
-    crypto_utils.py): la verifica qui usa quindi PKCS1v15, in linea
-    con quanto effettivamente prodotto da 'openssl ca'.
-
-    Equivalente, dal punto di vista logico, alla verifica descritta
-    nel WP2:
-        Verify(PK_CA, Hash(Cert_x), Firma_CA) = true
-    ma qui delegata interamente alla libreria 'cryptography', che
-    verifica la firma sul corpo (TBSCertificate) del certificato X.509
-    standard.
+    OpenSSL firma i certificati X.509 con RSA-PKCS#1v1.5:
+      la verifica qui usa quindi PKCS1v15
     """
     try:
         pk_ca.verify(
