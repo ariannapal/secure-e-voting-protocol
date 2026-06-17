@@ -103,7 +103,7 @@ def campo(etichetta: str, valore: str) -> None:
 # ============================================================================
 
 def sportello_amministrativo(stato: StatoSistema) -> None:
-    intestazione("SPORTELLO AMMINISTRATIVO — Autorita' Elettorale")
+    intestazione("SPORTELLO AMMINISTRATIVO")
     print()
     print("  Questo sportello e' riservato all'Autorita' Elettorale.")
     print("  Consente di inizializzare il sistema (Fase 1) e, al termine")
