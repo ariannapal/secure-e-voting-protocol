@@ -39,7 +39,7 @@ import crypto_utils as cu
 from pki import CertificationAuthority, Certificato, verifica_certificato_offline
 from ballot import MessaggioVoto, PayloadVoto, Ricevuta, calcola_receipt_id
 from election_config import ConfigurazioneElettorale
-from bulletin_board import (
+from bullettin_board import (
     BulletinBoard,
     BatchPubblicato,
     ChiusuraElezione,
