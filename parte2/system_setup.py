@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from pki import CertificationAuthority
 from entities import AutoritaElettorale, Urna, AuthServer, Client
+from election_config import ConfigurazioneElettorale, configurazione_demo
 
 
 @dataclass
@@ -31,6 +32,7 @@ class SistemaVoto:
     ae: AutoritaElettorale
     urna: Urna
     auth_server: AuthServer
+    configurazione: ConfigurazioneElettorale
 
 
 def inizializza_sistema() -> SistemaVoto:
@@ -41,6 +43,11 @@ def inizializza_sistema() -> SistemaVoto:
         - certificazione di tutte le chiavi pubbliche tramite la CA
           universitaria d'Ateneo.
 
+    Carica inoltre la configurazione elettorale (liste e candidati)
+    della consultazione corrente, in conformita' al principio di
+    riusabilita' dell'infrastruttura software (dati di sessione
+    separati dal codice delle componenti core).
+
     Ritorna un oggetto SistemaVoto con tutte le componenti pronte.
     """
     ca = CertificationAuthority()
@@ -48,13 +55,16 @@ def inizializza_sistema() -> SistemaVoto:
     ae = AutoritaElettorale()
     urna = Urna()
     auth_server = AuthServer()
+    configurazione = configurazione_demo()
 
     # Certificazione delle chiavi pubbliche presso la CA d'Ateneo.
     ae.richiedi_certificazione(ca)
     urna.richiedi_certificazione(ca)
     auth_server.richiedi_certificazione(ca)
 
-    return SistemaVoto(ca=ca, ae=ae, urna=urna, auth_server=auth_server)
+    return SistemaVoto(
+        ca=ca, ae=ae, urna=urna, auth_server=auth_server, configurazione=configurazione
+    )
 
 
 def bootstrap_client(sistema: SistemaVoto, student_id: str) -> Client:

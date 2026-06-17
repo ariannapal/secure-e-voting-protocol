@@ -9,30 +9,36 @@ universitario descritto nel WP2:
     - AuthServer  (Sistema di Autenticazione, AS)
     - Client      (applicazione/User Agent dell'elettore)
 
-In questa prima implementazione vengono coperte:
+In questa implementazione vengono coperte:
     * Fase 1 - Setup iniziale e PKI (generazione reale di chiavi RSA,
       certificazione tramite la CertificationAuthority)
     * Fase 2 - Autenticazione e rilascio del token (OIDC/FIDO2 simulati,
       registro degli aventi diritto, generazione e firma del token
       pseudonimo tramite RSA-PSS)
+    * Fase 3 - Preparazione e invio del voto cifrato (validazione
+      semantica Lista+Preferenza, cifratura RSA-OAEP, composizione e
+      invio del Payload di voto)
+    * Fase 4 - Ricezione, registrazione e verificabilita' del voto
+      (verifica del token, controllo di unicita' tramite
+      ElencoTokenUsati, calcolo del ReceiptID, rilascio della ricevuta
+      firmata dall'Urna e verifica locale lato client)
 
-Le fasi successive (cifratura/sottomissione del voto, Merkle Tree,
-scrutinio) sono lasciate come estensioni future e non sono trattate
-in questo modulo, in linea con la richiesta di implementare la
-struttura di base.
+Le fasi successive (Merkle Tree/Bulletin Board e scrutinio) sono
+lasciate come estensioni future.
 """
 
 from __future__ import annotations
 
 import time
-import json
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 import crypto_utils as cu
 from pki import CertificationAuthority, Certificato, verifica_certificato_offline
+from ballot import MessaggioVoto, PayloadVoto, Ricevuta, calcola_receipt_id
+from election_config import ConfigurazioneElettorale
 
 
 # ---------------------------------------------------------------------------
@@ -158,13 +164,22 @@ class Urna:
 
         self.cert_sig: Optional[Certificato] = None
 
-        # Stato dell'urna: token pseudonimi gia' utilizzati per votare.
-        # Chiave: valore del token (T) -> True se gia' utilizzato.
-        self._token_utilizzati: Dict[str, bool] = {}
+        # ElencoTokenUsati = {h_T1, h_T2, ...}: impronte SHA-256 dei token
+        # gia' impiegati per votare. Implementato come dizionario per
+        # ottenere una ricerca media O(1), come descritto nel WP2.
+        self._elenco_token_usati: Dict[str, bool] = {}
 
         # Stato dell'urna: token registrati/ricevuti ma non ancora "spesi".
         # Utile per ispezionare lo stato della componente dalla CLI.
         self._token_ricevuti: Dict[str, TokenVoto] = {}
+
+        # Coda interna persistente e append-only dei voti cifrati accettati,
+        # non ancora pubblicati a batch sul Bulletin Board (Fase 4).
+        self._coda_interna: list = []
+
+        # Ricevute emesse, indicizzate per ReceiptID (hex), per eventuali
+        # consultazioni successive (es. dalla CLI).
+        self._ricevute_emesse: Dict[str, "Ricevuta"] = {}
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """Ottiene il certificato X.509 per la propria chiave di firma."""
@@ -185,8 +200,15 @@ class Urna:
 
         Ritorna True se il token e' valido e non era gia' stato
         utilizzato, False altrimenti.
+
+        Nota: questo metodo e' mantenuto per compatibilita' e per
+        scenari in cui si vuole registrare un token senza ancora
+        sottomettere un voto. La sottomissione effettiva del voto
+        (Fase 4) avviene tramite 'ricevi_voto', che esegue gli stessi
+        controlli sul token nel contesto della ricezione del payload.
         """
-        if token.valore in self._token_utilizzati:
+        h_t_hex = token.hash_token.hex()
+        if h_t_hex in self._elenco_token_usati:
             return False
 
         firma_valida = cu.rsa_pss_verify(pk_as, token.hash_token, token.firma_as)
@@ -194,18 +216,92 @@ class Urna:
             return False
 
         self._token_ricevuti[token.valore] = token
-        self._token_utilizzati[token.valore] = True
+        self._elenco_token_usati[h_t_hex] = True
         return True
 
-    def token_gia_utilizzato(self, valore_token: str) -> bool:
-        """Verifica se un dato token e' gia' stato impiegato per votare."""
-        return self._token_utilizzati.get(valore_token, False)
+    def token_gia_utilizzato(self, token: TokenVoto) -> bool:
+        """
+        Verifica se un dato token e' gia' stato impiegato per votare,
+        controllando la presenza della sua impronta h_T = SHA256(T)
+        nell'ElencoTokenUsati (struttura a Hash Table, ricerca O(1)).
+        """
+        return token.hash_token.hex() in self._elenco_token_usati
+
+    # -- Fase 4: ricezione, registrazione e rilascio della ricevuta -----------------
+
+    def ricevi_voto(self, payload: PayloadVoto, pk_as: rsa.RSAPublicKey) -> Ricevuta:
+        """
+        Riceve dal Client il payload di voto Payload = {C, T, Sig_AS(T)}
+        ed esegue, nell'ordine, i controlli descritti in Fase 4:
+
+            1) verifica dell'autenticita' del token tramite
+               Verify(PK_AS, h_T, Sig_AS(T));
+            2) controllo di unicita' del token tramite l'ElencoTokenUsati
+               (hash table, ricerca O(1)), per impedire il riutilizzo;
+            3) registrazione del voto cifrato nella coda interna
+               persistente e append-only;
+            4) calcolo del ReceiptID = SHA256(T || C) e generazione
+               della ricevuta crittografica firmata dall'Urna con
+               RSA-PSS: Sig_UE(ReceiptID || Timestamp).
+
+        Solleva ValueError se il payload viene rifiutato (token non
+        autentico oppure gia' utilizzato), riportando il motivo.
+        Ritorna la Ricevuta in caso di accettazione del voto.
+        """
+        h_t = cu.sha256(bytes.fromhex(payload.token_hex))
+        h_t_hex = h_t.hex()
+
+        # --- Passo 1: verifica autenticita' del token --------------------------
+        firma_as_bytes = bytes.fromhex(payload.firma_as_hex)
+        firma_valida = cu.rsa_pss_verify(pk_as, h_t, firma_as_bytes)
+        if not firma_valida:
+            raise ValueError("Token non autentico: verifica Sig_AS(T) fallita.")
+
+        # --- Passo 2: controllo di unicita' (ElencoTokenUsati, O(1)) ------------
+        if h_t_hex in self._elenco_token_usati:
+            raise ValueError("Token gia' utilizzato: voto respinto (anti double-voting).")
+
+        # Token autentico e non ancora usato: lo marchiamo immediatamente
+        # come utilizzato, prima di proseguire con la registrazione.
+        self._elenco_token_usati[h_t_hex] = True
+
+        # --- Passo 3: registrazione nella coda interna persistente --------------
+        receipt_id_hex = calcola_receipt_id(payload.token_hex, payload.ciphertext_hex)
+        timestamp = time.time()
+
+        voto_registrato = {
+            "token_hex": payload.token_hex,
+            "ciphertext_hex": payload.ciphertext_hex,
+            "receipt_id_hex": receipt_id_hex,
+            "timestamp": timestamp,
+        }
+        self._coda_interna.append(voto_registrato)
+
+        # --- Passo 4: generazione della ricevuta crittografica firmata ----------
+        messaggio_da_firmare = receipt_id_hex.encode() + str(timestamp).encode()
+        firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
+
+        ricevuta = Ricevuta(
+            token_hex=payload.token_hex,
+            ciphertext_hex=payload.ciphertext_hex,
+            receipt_id_hex=receipt_id_hex,
+            timestamp=timestamp,
+            firma_ue=firma_ue,
+        )
+        self._ricevute_emesse[receipt_id_hex] = ricevuta
+        return ricevuta
+
+    def numero_voti_in_coda(self) -> int:
+        """Numero di voti attualmente registrati nella coda interna (non ancora pubblicati a batch)."""
+        return len(self._coda_interna)
 
     def stato(self) -> str:
         """Riassunto leggibile dello stato corrente dell'Urna."""
         return (
             f"Urna(id={self.id}, certificata={self.cert_sig is not None}, "
-            f"token_registrati={len(self._token_ricevuti)})"
+            f"token_registrati={len(self._token_ricevuti)}, "
+            f"voti_in_coda={len(self._coda_interna)}, "
+            f"ricevute_emesse={len(self._ricevute_emesse)})"
         )
 
     def __repr__(self) -> str:
@@ -239,40 +335,16 @@ class AuthServer:
 
     BIT_SIZE_AS = 2048
 
-    def __init__(self, path_registro: str = "studenti.json"):
+    def __init__(self):
         self.id = "AS-AUTENTICAZIONE"
-        self._sk_sig = cu.genera_coppia_rsa(self.BIT_SIZE_AS)
-        self.pk_sig = self._sk_sig.public_key()
-        self.cert_sig = None
+
+        self._sk_sig: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_AS)
+        self.pk_sig: rsa.RSAPublicKey = self._sk_sig.public_key()
+
+        self.cert_sig: Optional[Certificato] = None
+
+        # Registro_Elettori = { student_ID -> RegistroElettoreEntry }
         self._registro_elettori: Dict[str, RegistroElettoreEntry] = {}
-        
-        # Caricamento del JSON nel server
-        self._carica_registro(path_registro)
-
-    def _carica_registro(self, path: str):
-        try:
-            with open(path, 'r') as f:
-                dati = json.load(f)
-                for s in dati["studenti"]:
-                    self._registro_elettori[s["student_id"]] = RegistroElettoreEntry(
-                        student_id=s["student_id"],
-                        avente_diritto=s["avente_diritto"],
-                        token_rilasciato=s["token_rilasciato"]
-                    )
-        except FileNotFoundError:
-            print(f"[Avviso] File {path} non trovato.")
-
-    def salva_registro(self, path: str = "studenti.json"):
-        """Salva lo stato attuale del registro nel file JSON."""
-        dati = {"studenti": []}
-        for entry in self._registro_elettori.values():
-            dati["studenti"].append({
-                "student_id": entry.student_id,
-                "avente_diritto": entry.avente_diritto,
-                "token_rilasciato": entry.token_rilasciato
-            })
-        with open(path, 'w') as f:
-            json.dump(dati, f, indent=4)
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """Ottiene il certificato X.509 per la propria chiave di firma."""
@@ -403,9 +475,6 @@ class AuthServer:
         # Aggiornamento dello stato: il token e' stato rilasciato.
         self._registro_elettori[student_id].token_rilasciato = True
 
-        # Salva immediatamente su disco per rendere persistente il cambiamento
-        self.salva_registro()
-
         return token
 
     def __repr__(self) -> str:
@@ -450,6 +519,12 @@ class Client:
 
         # Token di voto ottenuto in Fase 2 (None finche' non richiesto).
         self.token: Optional[TokenVoto] = None
+
+        # Stato relativo alla Fase 3/4 (voto espresso e ricevuta ottenuta).
+        self.ultimo_messaggio: Optional[MessaggioVoto] = None   # M in chiaro
+        self.ultimo_ciphertext_hex: Optional[str] = None        # C = RSA-OAEP(PK_AE, M), in hex
+        self.ultimo_payload: Optional[PayloadVoto] = None
+        self.ultima_ricevuta: Optional[Ricevuta] = None
 
     # -- Fase 1: bootstrapping della fiducia ----------------------------------------
 
@@ -515,6 +590,146 @@ class Client:
         if self.token is None or self.pk_as_sig is None:
             return False
         return cu.rsa_pss_verify(self.pk_as_sig, self.token.hash_token, self.token.firma_as)
+
+    # -- Fase 3: preparazione, cifratura e invio del voto ----------------------------
+
+    def vota(
+        self,
+        lista: str,
+        candidato: Optional[str],
+        urna: "Urna",
+        configurazione: ConfigurazioneElettorale,
+    ) -> Ricevuta:
+        """
+        Implementa per intero la Fase 3 e la consegna del voto descritta
+        nel WP2:
+
+            1) Validazione semantica della combinazione (lista, candidato):
+               il candidato, se presente, deve appartenere alla lista
+               selezionata. Non e' ammesso scegliere un candidato di una
+               lista diversa.
+            2) Costruzione del messaggio in chiaro
+               M = (lista, candidato, nonce) e relativa serializzazione
+               JSON -> byte.
+            3) Cifratura RSA-OAEP del messaggio con la chiave pubblica
+               di cifratura dell'Autorita' Elettorale (PK_AE^enc),
+               precedentemente verificata e caricata in Fase 1/3:
+                   C = RSA-OAEP_Encrypt(PK_AE_enc, M)
+            4) Composizione del Payload di voto:
+                   Payload = { C, T, Sig_AS(T) }
+            5) Invio del payload all'Urna Elettronica tramite il
+               metodo 'ricevi_voto' (che modella il canale HTTPS/TLS
+               Client -> UE), ottenendo la Ricevuta crittografica.
+
+        Precondizioni: il Client deve avere completato il bootstrap
+        della fiducia (fiducia_inizializzata) ed avere ottenuto un
+        token di voto valido (token non None).
+
+        Solleva:
+            RuntimeError se la fiducia non e' stata inizializzata o se
+                non si possiede ancora un token di voto;
+            ValueError se la combinazione (lista, candidato) non e'
+                semanticamente valida, oppure se l'Urna rifiuta il voto
+                (token non autentico o gia' utilizzato).
+        """
+        if not self.fiducia_inizializzata:
+            raise RuntimeError(
+                "Bootstrap della fiducia non completato: impossibile cifrare il "
+                "voto senza aver prima verificato i certificati di AE e UE."
+            )
+        if self.token is None:
+            raise RuntimeError(
+                "Nessun token di voto disponibile: e' necessario autenticarsi "
+                "(Fase 2) prima di poter votare."
+            )
+
+        # --- Passo 1: validazione semantica Lista + Preferenza vincolata --------
+        if not configurazione.lista_esiste(lista):
+            raise ValueError(f"La lista '{lista}' non esiste nella configurazione elettorale.")
+
+        if candidato is not None:
+            if not configurazione.candidato_appartiene_a_lista(lista, candidato):
+                raise ValueError(
+                    f"Il candidato '{candidato}' non appartiene alla lista '{lista}': "
+                    "selezione non ammessa (preferenza vincolata)."
+                )
+
+        # --- Passo 2: costruzione del messaggio in chiaro M ----------------------
+        messaggio = MessaggioVoto.crea(lista=lista, candidato=candidato)
+        if not messaggio.valida_dimensioni():
+            raise ValueError(
+                "I campi 'lista' o 'candidato' superano la dimensione massima "
+                "consentita (64 byte UTF-8)."
+            )
+        m_bytes = messaggio.to_json_bytes()
+
+        # --- Passo 3: cifratura RSA-OAEP con PK_AE^enc ----------------------------
+        ciphertext = cu.rsa_oaep_encrypt(self.pk_ae_enc, m_bytes)
+        ciphertext_hex = ciphertext.hex()
+
+        # --- Passo 4: composizione del Payload di voto ----------------------------
+        payload = PayloadVoto(
+            ciphertext_hex=ciphertext_hex,
+            token_hex=self._token_hex(),
+            firma_as_hex=self.token.firma_as.hex(),
+        )
+
+        # --- Passo 5: invio del payload all'Urna (canale HTTPS/TLS modellato) ----
+        ricevuta = urna.ricevi_voto(payload, pk_as=self.pk_as_sig)
+
+        # Aggiornamento dello stato locale del Client.
+        self.ultimo_messaggio = messaggio
+        self.ultimo_ciphertext_hex = ciphertext_hex
+        self.ultimo_payload = payload
+        self.ultima_ricevuta = ricevuta
+
+        return ricevuta
+
+    def _token_hex(self) -> str:
+        """
+        Restituisce la rappresentazione esadecimale del token pseudonimo
+        T, cosi' come memorizzata e trasmessa nel Payload di voto
+        (campo 'token' della Tabella del WP2, codifica esadecimale).
+        """
+        return self.token.valore.encode("utf-8").hex()
+
+    # -- Fase 4 (lato client): verifica locale della ricevuta -----------------------
+
+    def verifica_ricevuta(self) -> bool:
+        """
+        Esegue il doppio controllo locale descritto in Fase 4:
+
+            1) ricalcola ReceiptID' = SHA256(T || C) usando il token e
+               il ciphertext effettivamente inviati, e lo confronta con
+               il ReceiptID riportato nella ricevuta (questo rileva
+               qualsiasi alterazione di C avvenuta dopo l'invio);
+            2) verifica la firma dell'Urna Sig_UE(ReceiptID || Timestamp)
+               con la chiave pubblica PK_UE_sig, caricata e verificata
+               in Fase 1, per accertarsi che la ricevuta sia stata
+               effettivamente prodotta dall'Urna Elettronica.
+
+        Ritorna True solo se entrambi i controlli hanno esito positivo.
+        """
+        if self.ultima_ricevuta is None or self.ultimo_payload is None:
+            return False
+        if self.pk_ue_sig is None:
+            return False
+
+        ricevuta = self.ultima_ricevuta
+
+        # --- Controllo 1: ricalcolo locale del ReceiptID --------------------------
+        receipt_id_ricalcolato = calcola_receipt_id(
+            token_hex=self.ultimo_payload.token_hex,
+            ciphertext_hex=self.ultimo_payload.ciphertext_hex,
+        )
+        if receipt_id_ricalcolato != ricevuta.receipt_id_hex:
+            return False
+
+        # --- Controllo 2: verifica della firma dell'Urna ---------------------------
+        messaggio_firmato = ricevuta.messaggio_firmato()
+        firma_valida = cu.rsa_pss_verify(self.pk_ue_sig, messaggio_firmato, ricevuta.firma_ue)
+
+        return firma_valida
 
     def __repr__(self) -> str:
         return (
