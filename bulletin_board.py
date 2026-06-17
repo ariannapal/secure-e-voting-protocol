@@ -1,9 +1,6 @@
 """
-bulletin_board.py
-------------------
 Implementazione del Bulletin Board (BB) pubblico, consultabile in
-modalita' read-only da elettori e osservatori, secondo il WP2 (Fase 4
-e Fase 5).
+modalita' read-only da elettori e osservatori
 
 Contiene:
     - BatchPubblicato: un singolo batch pubblicato dall'Urna, con le
@@ -40,11 +37,7 @@ class BatchPubblicato:
     raggiungere la cardinalita' minima B_min quando il batch viene
     pubblicato per timeout o per chiusura sotto soglia, secondo il
     WP2). Il numero di dummy e' reso pubblico e incluso nel perimetro
-    della firma Sig_UE: questo non rivela QUALI tuple siano fittizie
-    (l'anonimato del singolo voto reale resta protetto), ma permette
-    all'Autorita' Elettorale di escludere correttamente il padding dal
-    controllo di coerenza quantitativa rispetto a n_token, senza dover
-    fare affidamento su un canale diverso dal Bulletin Board.
+    della firma Sig_UE.
     """
     batch_id: str
     tuple_voti: List[Tuple[str, str]]   # [(ReceiptID_hex, ciphertext_hex), ...]
@@ -60,8 +53,7 @@ class ChiusuraElezione:
     Pubblicazione di chiusura della sessione elettorale (Fase 5):
 
         BB <- BB U { election_id, [(L_j, C_j), ...], R_finale, timestamp_chiusura, Sig_UE }
-
-    Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
+         dove Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
     """
     election_id: str
     radice_finale_hex: str
@@ -178,7 +170,7 @@ class BulletinBoard:
         Somma dei 'numero_dummy' dichiarati su tutti i batch pubblicati:
         rappresenta il totale delle schede fittizie di padding incluse
         nell'intero registro, da escludere dal controllo di coerenza
-        quantitativa rispetto a n_token (WP2, Fase 5).
+        quantitativa rispetto a n_token.
         """
         return sum(batch.numero_dummy for batch in self.batch_pubblicati)
 
