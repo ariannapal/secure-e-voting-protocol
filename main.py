@@ -261,7 +261,7 @@ def _amm_scrutinio(stato: StatoSistema) -> None:
     campo("Voti cifrati scrutinati:", str(verbale.voti_cifrati_scrutinati))
     campo("Voti decifrati:", str(verbale.voti_decifrati))
     campo("Voti validi:", str(verbale.voti_validi))
-    campo("Voti non validi (incl. padding scartato):", str(verbale.voti_non_validi))
+    campo("Voti non validi:", str(verbale.voti_non_validi))
     print()
     print("  Risultati per lista:")
     for lista, voti in verbale.risultati_per_lista.items():
