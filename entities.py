@@ -1096,7 +1096,7 @@ class AuthServer:
         self.pk_sig: Optional[rsa.RSAPublicKey] = None
         self._dir_lavoro = "pki_runtime/AS"
         self.cert_sig: Optional[Certificato] = None
-        
+
         # Registro_Elettori = { student_ID -> RegistroElettoreEntry }
         self._registro_elettori: Dict[str, RegistroElettoreEntry] = {}
 
@@ -1303,7 +1303,7 @@ class AuthServer:
 
         # --- Passo 5: generazione e firma del token pseudonimo -------------------
         valore_token = cu.genera_id_esadecimale(32)
-        hash_token = cu.sha256(valore_token.encode())
+        hash_token = cu.sha256(bytes.fromhex(valore_token))
         firma_as = cu.rsa_pss_sign(self._sk_sig, hash_token)
 
         token = TokenVoto(
@@ -1535,7 +1535,7 @@ class Client:
         T, cosi' come memorizzata e trasmessa nel Payload di voto
         (campo 'token' della Tabella del WP2, codifica esadecimale).
         """
-        return self.token.valore.encode("utf-8").hex()
+        return self.token.valore
 
     # -- Fase 4 (lato client): verifica locale della ricevuta -----------------------
 
