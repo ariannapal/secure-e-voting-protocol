@@ -1,0 +1,102 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║               BENCHMARK – SISTEMA DI VOTO ELETTRONICO                ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Ripetizioni per misura  : 10
+  Elettori per Fase 5     : 20
+  Data esecuzione         : 2026-06-17 21:54:14
+
+  Legenda colonne         : media (ms)  ±std  [min–max]  p95
+
+────────────────────────────────────────────────────────────────────────
+  1. COSTO COMPUTAZIONALE DELLE PRIMITIVE CRITTOGRAFICHE
+────────────────────────────────────────────────────────────────────────
+  Operazione                                      Media       ±Std        [min–max]        p95
+  ──────────────────────────────────────────────────────────────────────
+  Keygen RSA-2048                              124.49 ms  ±  56.80  [68.54–233.11]  p95=233.11
+  Keygen RSA-4096                              660.18 ms  ± 317.44  [337.93–1046.09]  p95=1046.09
+  RSA-OAEP Encrypt (PK_AE 4096 bit)              0.06 ms  ±   0.01  [0.06–0.08]  p95=0.08
+  RSA-OAEP Decrypt (SK_AE 4096 bit)              3.71 ms  ±   0.36  [3.57–4.74]  p95=4.74
+  RSA-PSS Sign (SK_AS/UE 2048 bit)               0.57 ms  ±   0.01  [0.57–0.59]  p95=0.59
+  RSA-PSS Verify (PK_AS/UE 2048 bit)             0.03 ms  ±   0.01  [0.02–0.05]  p95=0.05
+  RSA-PSS Sign (SK_AE 4096 bit)                  3.58 ms  ±   0.01  [3.57–3.60]  p95=3.60
+  RSA-PSS Verify (PK_AE 4096 bit)                0.06 ms  ±   0.00  [0.06–0.06]  p95=0.06
+  SHA-256 (64 byte - nonce/token)                0.00 ms  ±   0.00  [0.00–0.00]  p95=0.00
+  SHA-256 (4096 byte - batch payload)            0.00 ms  ±   0.00  [0.00–0.00]  p95=0.00
+  CSPRNG 32 byte (token/nonce)                   0.00 ms  ±   0.00  [0.00–0.00]  p95=0.00
+  ReceiptID = SHA256(T_hex || C_hex)             0.00 ms  ±   0.00  [0.00–0.00]  p95=0.00
+
+────────────────────────────────────────────────────────────────────────
+  2. SCALABILITÀ MERKLE TREE
+────────────────────────────────────────────────────────────────────────
+  Operazione                                      Media       ±Std        [min–max]        p95
+  ──────────────────────────────────────────────────────────────────────
+  Merkle Root (10 foglie)                        0.01 ms  ±   0.00  [0.01–0.02]  p95=0.02
+  Merkle Root (50 foglie)                        0.03 ms  ±   0.00  [0.03–0.04]  p95=0.04
+  Merkle Root (100 foglie)                       0.06 ms  ±   0.00  [0.06–0.07]  p95=0.07
+  Merkle Root (250 foglie)                       0.15 ms  ±   0.00  [0.15–0.15]  p95=0.15
+  Merkle Root (500 foglie)                       0.36 ms  ±   0.13  [0.30–0.70]  p95=0.70
+  Merkle Root (1000 foglie)                      0.61 ms  ±   0.03  [0.59–0.68]  p95=0.68
+
+  Merkle Proof build+verify (10 foglie)          0.02 ms  ±   0.00  [0.02–0.03]  p95=0.03
+  Merkle Proof build+verify (50 foglie)          0.07 ms  ±   0.00  [0.07–0.07]  p95=0.07
+  Merkle Proof build+verify (100 foglie)         0.13 ms  ±   0.00  [0.13–0.14]  p95=0.14
+  Merkle Proof build+verify (250 foglie)         0.32 ms  ±   0.02  [0.31–0.38]  p95=0.38
+  Merkle Proof build+verify (500 foglie)         0.61 ms  ±   0.00  [0.60–0.62]  p95=0.62
+  Merkle Proof build+verify (1000 foglie)        1.22 ms  ±   0.01  [1.22–1.23]  p95=1.23
+
+────────────────────────────────────────────────────────────────────────
+  3. DIMENSIONE DEI MESSAGGI SCAMBIATI TRA LE ENTITÀ
+────────────────────────────────────────────────────────────────────────
+  Struttura / Messaggio                            Byte   Note
+  ──────────────────────────────────────────────────────────────────────
+  MessaggioVoto in chiaro M (JSON)                146 B  (lista + candidato + nonce hex (64 char))
+  Ciphertext C = RSA-OAEP(PK_AE 4096)             512 B  (= modulo / 8 = 512 B)
+  Token T (bytes)                                  32 B  (valore pseudonimo CSPRNG)
+  Token T (hex string, campo del payload)          64 B  (64 caratteri ASCII)
+  Sig_AS(T) = RSA-PSS(SK_AS 2048)                 256 B  (= modulo / 8 = 256 B)
+  PayloadVoto { C, T, Sig_AS(T) } (JSON)         1648 B  =   1.61 KB  (trasmesso Client → Urna (HTTPS/TLS))
+  ReceiptID = SHA256(T||C) (hex string)            64 B  (64 caratteri ASCII)
+  Sig_UE(ReceiptID||Timestamp) (bytes)            256 B  (= modulo / 8 = 256 B)
+  Ricevuta { T,C,ReceiptID,ts,Sig_UE } (totale logico)   1416 B  =   1.38 KB  (rilasciata dall'Urna al Client)
+  Tupla BB (ReceiptID_hex, C_hex)                1088 B  =   1.06 KB  (entry nel registro pubblico)
+  Sig_UE(batch) = RSA-PSS(SK_UE 2048)             256 B  (firma su batch pubblicato sul BB)
+  AttestazioneTokenAS { n_token, Sig_AS }         258 B  (n_token=20)
+
+  → Un singolo voto occupa ≈ 1648 B sul canale Client→Urna (hex-encoded JSON).
+
+────────────────────────────────────────────────────────────────────────
+  4. LATENZA DELLE FASI DEL PROTOCOLLO (sistema reale)
+────────────────────────────────────────────────────────────────────────
+  Operazione                                      Media       ±Std        [min–max]        p95
+  ──────────────────────────────────────────────────────────────────────
+  Fase 1 – Setup PKI completo (AE×2+UE+AS cert)  1924.65 ms  ± 348.07  [1592.74–2286.91]  p95=2286.91
+  Fase 1b – Bootstrap fiducia (verifica 4 cert X.509)     0.32 ms  ±   0.23  [0.24–0.98]  p95=0.98
+  Fase 2 – Autenticazione + rilascio TokenVoto   115.05 ms  ±  58.39  [42.27–188.94]  p95=188.94
+  Fase 2b – Verifica locale Sig_AS(T) (lato Client)     0.03 ms  ±   0.01  [0.02–0.04]  p95=0.04
+  Fase 3 – Cifratura RSA-OAEP + composizione Payload     0.10 ms  ±   0.02  [0.09–0.16]  p95=0.16
+  Fase 3+4 – Voto completo (cifratura+invio+ricevuta)     0.74 ms  ±   0.12  [0.69–1.09]  p95=1.09
+  Fase 4 – Verifica locale ricevuta (ReceiptID + Sig_UE)     0.03 ms  ±   0.03  [0.02–0.11]  p95=0.11
+  Fase 5 – Scrutinio (20 voti reali)           155.62 ms  ±   6.48  [151.22–163.06]  p95=163.06
+  Fase 5 – Verifica integrita' BB (20 voti)      0.11 ms  ±   0.01  [0.11–0.14]  p95=0.14
+
+────────────────────────────────────────────────────────────────────────
+  5. RIEPILOGO E NOTE INTERPRETATIVE
+────────────────────────────────────────────────────────────────────────
+  • La cifratura RSA-OAEP con chiave 4096 bit richiede ≈0.1 ms lato Client.
+    Il costo è percettivamente trascurabile per l'utente finale.
+  • La decifratura RSA-OAEP (solo in Fase 5, lato AE) richiede ≈3.7 ms/voto.
+    Per 1 000 voti lo scrutinio richiede ≈3.7 s (solo decifrature).
+  • RSA-PSS Sign (2048 bit): ≈0.6 ms — token AS, ricevuta UE.
+  • RSA-PSS Verify (2048 bit): ≈0.0 ms — lato Client e AE.
+  • Keygen RSA-2048: ≈124 ms; RSA-4096: ≈660 ms (solo Fase 1).
+  • Merkle Root su 1 000 foglie: ≈0.61 ms — overhead trascurabile.
+  • Fase 1 (setup PKI, operazione una-tantum): ≈1.9 s.
+  • Fase 5 (scrutinio 20 voti): ≈156 ms.
+  • Payload di voto ≈ 1648 B — compatibile con connessioni di rete standard;
+    a 1 Mbit/s il trasferimento richiede < 13.2 ms.
+
+  Tutte le misure sono wall-clock time (perf_counter), eseguite su un
+  singolo processo Python senza parallelismo. Valori reali su hardware
+  dedicato e con TLS attivo potrebbero differire.
+════════════════════════════════════════════════════════════════════════
