@@ -4,7 +4,7 @@ CLI per il sistema di voto elettronico universitario.
 Realizza DUE sportelli distinti, ciascuno con il proprio loop
 interattivo, che riflettono i ruoli del protocollo WP2:
 
-  [A] Sportello Amministrativo  (Autorita' Elettorale / gestore del sistema)
+  [A] Sportello Amministrativo
         Fase 1  – Inizializza CA, chiavi RSA, certificati X.509,
                   caricamento Registro_Elettori
         Fase 5  – Chiusura urna, scrutinio, pubblicazione verbale finale
@@ -105,12 +105,12 @@ def campo(etichetta: str, valore: str) -> None:
 def sportello_amministrativo(stato: StatoSistema) -> None:
     intestazione("SPORTELLO AMMINISTRATIVO")
     print()
-    print("  Questo sportello e' riservato all'Autorita' Elettorale.")
+    print("  Questo sportello e' riservato al Sistema.")
     print("  Consente di inizializzare il sistema (Fase 1) e, al termine")
     print("  della finestra di voto, di chiudere l'urna ed eseguire")
     print("  lo scrutinio (Fase 5).")
     print()
-    print("  Gli elettori devono usare lo Sportello Elettore.")
+    print("  Gli elettori devono attendere l'inizializzazione del sistema per poter votare.")
 
     while True:
         print()
@@ -283,7 +283,7 @@ def sportello_elettore(stato: StatoSistema) -> None:
 
     if not stato.pronto:
         errore("Il sistema non e' ancora inizializzato.")
-        print("  L'Autorita' Elettorale deve prima completare la Fase 1.")
+        print("  Il sistema deve prima completare la Fase 1.")
         input("  [Invio per tornare al menu principale] ")
         return
 
@@ -623,39 +623,42 @@ def _el_verifica_ricevuta(client: Client) -> None:
 def menu_principale(stato: StatoSistema) -> None:
     while True:
         intestazione("SISTEMA DI VOTO ELETTRONICO UNIVERSITARIO")
-        print()
-
-        # Indicatore di stato sintetico
+        
         if not stato.pronto:
-            avviso("Sistema non ancora inizializzato — Fase 1 richiesta.")
-        elif stato.elezione_aperta:
-            n = stato.sistema.urna.numero_voti_in_coda() + len(stato.sistema.bb.tutte_le_tuple())
-            ok(f"Sistema attivo — elezione aperta  (voti ricevuti: {n})")
-        else:
-            ok("Elezione chiusa — scrutinio completato.")
-
-        print()
-        print("  A  Sportello Amministrativo  (Autorita' Elettorale)")
-        print("     Fase 1: inizializzazione  |  Fase 5: scrutinio")
-        print()
-        print("  E  Sportello Elettore        (sessione di voto studente)")
-        print("     Autenticati → Vota → Verifica ricevuta")
-        print()
-        print("  0  Esci")
-        print()
-
-        scelta = input("  Accesso: ").strip().upper()
-
-        if scelta == "0":
+            print("\n  Sistema non inizializzato.")
+            print("  Accesso consentito solo allo Sportello Amministrativo.")
+            print("\n  [A] Sportello Amministrativo (Fase 1: Inizializzazione)")
+            print("  [0] Esci")
             print()
-            print("  Uscita dal sistema. Arrivederci.")
-            sys.exit(0)
-        elif scelta == "A":
-            sportello_amministrativo(stato)
-        elif scelta == "E":
-            sportello_elettore(stato)
+            
+            scelta = input("  Accesso: ").strip().upper()
+            
+            if scelta == "A":
+                sportello_amministrativo(stato)
+            elif scelta == "0":
+                sys.exit(0)
+            else:
+                avviso("Scelta non valida.")
+        
         else:
-            avviso("Scelta non valida.")
+            # Menu completo (mostrato solo dopo l'inizializzazione)
+            print()
+            ok("Sistema inizializzato e pronto.")
+            print("\n  [A] Sportello Amministrativo (Gestione)")
+            print("  [E] Sportello Elettore       (Voto)")
+            print("  [0] Esci")
+            print()
+            
+            scelta = input("  Accesso: ").strip().upper()
+            
+            if scelta == "A":
+                sportello_amministrativo(stato)
+            elif scelta == "E":
+                sportello_elettore(stato)
+            elif scelta == "0":
+                sys.exit(0)
+            else:
+                avviso("Scelta non valida.")
 
 
 # ============================================================================
