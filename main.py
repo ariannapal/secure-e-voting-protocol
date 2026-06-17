@@ -68,6 +68,10 @@ class StatoSistema:
 
 LARGHEZZA = 64
 
+def badge(stato: str, msg: str) -> None:
+    """Mostra un badge colorato/testuale per lo stato del sistema"""
+    print(f"  [{stato:^10}] {msg}")
+    
 def linea(char: str = "─") -> str:
     return char * LARGHEZZA
 
