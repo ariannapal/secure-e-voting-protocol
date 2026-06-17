@@ -1,18 +1,8 @@
 """
-election_config.py
--------------------
 Configurazione della singola consultazione elettorale: liste e
 candidati ammessi.
 
-In coerenza con la "Riusabilita' dell'infrastruttura software" descritta
-nel WP2, i dati specifici della votazione (liste, candidati) sono
-tenuti separati dal codice delle componenti core (AS, Urna, Client) e
-caricati dinamicamente da questa configurazione, in modo che una nuova
-sessione elettorale possa essere avviata senza modificare il codice
-sorgente.
-
 Il modello di voto adottato e':
-
     Lista (L) + Preferenza interna vincolata (X)
 
 cioe' lo studente seleziona obbligatoriamente una lista e, in modo
@@ -29,7 +19,6 @@ class ConfigurazioneElettorale:
     """
     Rappresenta l'insieme delle liste ammesse e, per ciascuna lista,
     i candidati tra cui e' possibile esprimere la preferenza interna.
-
     Struttura: { nome_lista: [candidato_1, candidato_2, ...] }
     """
     liste: Dict[str, List[str]] = field(default_factory=dict)
@@ -56,10 +45,6 @@ class ConfigurazioneElettorale:
 
 
 def configurazione_demo() -> ConfigurazioneElettorale:
-    """
-    Costruisce una configurazione elettorale di esempio, utile per la
-    CLI e per i test, con alcune liste e candidati gia' precaricati.
-    """
     cfg = ConfigurazioneElettorale()
     cfg.aggiungi_lista("Lista A - StudentiIngegneria", ["Marco Rossi", "Chiara Bianchi"])
     cfg.aggiungi_lista("Lista B - Agora'", ["Andrea Russo", "Francesca Ferrari"])

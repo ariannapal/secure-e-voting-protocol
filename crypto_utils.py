@@ -1,17 +1,12 @@
 """
-crypto_utils.py
-----------------
+
 Funzioni di utilita' crittografiche condivise dal sistema di voto.
 
-Implementa i primitivi descritti nel WP2:
 - RSA-OAEP per la cifratura probabilistica dei voti;
 - RSA-PSS per le firme digitali (autenticita' e non-ripudio);
 - SHA-256 per impronte, ReceiptID e nodi del Merkle Tree;
 - CSPRNG per token, challenge, nonce e seed.
 
-Tutte le funzioni qui contenute si basano sulla libreria 'cryptography',
-che internamente utilizza un CSPRNG fornito dal sistema operativo per
-la generazione di chiavi, padding OAEP/PSS e numeri casuali.
 """
 
 import os
@@ -32,9 +27,6 @@ def genera_coppia_rsa(bit_size: int) -> rsa.RSAPrivateKey:
     Genera una coppia di chiavi RSA (privata/pubblica) della dimensione
     richiesta. L'esponente pubblico e' fissato a 65537, valore standard
     raccomandato per RSA.
-
-    Corrisponde, nel protocollo, a:
-        (PK, SK) <- RSA_KeyGen(bit_size)
     """
     chiave_privata = rsa.generate_private_key(
         public_exponent=65537,
@@ -50,10 +42,7 @@ def genera_coppia_rsa(bit_size: int) -> rsa.RSAPrivateKey:
 def rsa_oaep_encrypt(public_key: rsa.RSAPublicKey, plaintext: bytes) -> bytes:
     """
     Cifra 'plaintext' con RSA-OAEP usando la chiave pubblica fornita.
-    OAEP introduce un padding randomizzato: a parita' di messaggio in
-    chiaro, il ciphertext prodotto e' (con probabilita' overwhelming)
-    sempre diverso ad ogni chiamata. Questo realizza la cifratura
-    probabilistica richiesta per la cifratura del voto.
+    Realizza la cifratura probabilistica per la cifratura del voto.
     """
     return public_key.encrypt(
         plaintext,
@@ -86,9 +75,7 @@ def rsa_oaep_decrypt(private_key: rsa.RSAPrivateKey, ciphertext: bytes) -> bytes
 
 def rsa_pss_sign(private_key: rsa.RSAPrivateKey, message: bytes) -> bytes:
     """
-    Firma 'message' con RSA-PSS, usato per garantire autenticita' e
-    non-ripudio (es. AS che firma il token, Urna che firma le ricevute
-    e le Merkle Root, AE che firma il verbale finale).
+    Firma 'message' con RSA-PSS
     """
     return private_key.sign(
         message,
@@ -103,7 +90,6 @@ def rsa_pss_sign(private_key: rsa.RSAPrivateKey, message: bytes) -> bytes:
 def rsa_pss_verify(public_key: rsa.RSAPublicKey, message: bytes, signature: bytes) -> bool:
     """
     Verifica una firma RSA-PSS. Ritorna True se valida, False altrimenti
-    (non solleva eccezioni verso il chiamante, per comodita' d'uso nella CLI).
     """
     try:
         public_key.verify(
@@ -130,7 +116,7 @@ def sha256(data: bytes) -> bytes:
 
 
 def sha256_hex(data: bytes) -> str:
-    """Come sha256(), ma ritorna la rappresentazione esadecimale (stringa)."""
+    """Come sha256(), ma ritorna la rappresentazione esadecimale."""
     return hashlib.sha256(data).hexdigest()
 
 
@@ -141,12 +127,7 @@ def sha256_hex(data: bytes) -> str:
 def genera_valore_casuale(n_bytes: int = 32) -> bytes:
     """
     Genera 'n_bytes' casuali tramite CSPRNG (generatore pseudocasuale
-    crittograficamente sicuro). Utilizzato per token pseudonimi,
-    challenge FIDO2, nonce e seed di cifratura.
-
-    Si appoggia a 'secrets', modulo standard Python pensato per la
-    generazione di valori sicuri dal punto di vista crittografico
-    (a sua volta basato su os.urandom).
+    crittograficamente sicuro).
     """
     return secrets.token_bytes(n_bytes)
 

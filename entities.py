@@ -56,9 +56,7 @@ class TokenVoto:
     """
     Token pseudonimo di voto T, rilasciato dall'AS allo studente che ha
     superato con successo l'autenticazione e il controllo degli aventi
-    diritto. Il token e' firmato dall'AS in modo che l'Urna possa
-    verificarne l'autenticita' senza dover risalire all'identita' reale
-    dello studente (pseudo-anonimato).
+    diritto. Il token e' firmato dall'AS.
     """
     valore: str            # T: identificativo pseudonimo casuale (hex)
     hash_token: bytes       # h_T = SHA256(T)
@@ -118,7 +116,7 @@ class AutoritaElettorale:
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """
-        Genera (tramite OpenSSL) le due coppie di chiavi RSA a 4096 bit
+        Genera tramite OpenSSL le due coppie di chiavi RSA a 4096 bit
         dell'AE (cifratura e firma), produce le due CSR corrispondenti e
         le sottopone alla Certification Authority d'Ateneo, ottenendo i
         due certificati X.509 distinti:
@@ -126,10 +124,6 @@ class AutoritaElettorale:
             Cert_AE^enc = {ID_AE, PK_AE^enc, Uso: Cifratura, ...}
             Cert_AE^sig = {ID_AE, PK_AE^sig, Uso: Firma Digitale, ...}
 
-        Le chiavi private vengono generate su disco da OpenSSL e poi
-        ricaricate in memoria con 'cryptography', per essere utilizzate
-        nelle operazioni applicative (RSA-OAEP per la decifratura in Fase
-        5, RSA-PSS per la firma del verbale finale).
         """
         # --- Coppia di cifratura/decifratura ---------------------------------
         percorso_chiave_enc, percorso_csr_enc = genera_chiave_e_csr(
@@ -206,10 +200,7 @@ class AutoritaElettorale:
         Esegue le verifiche di integrita' e coerenza sui dati scaricati dal Bulletin Board:
             1) per ogni tupla (T_i, C_i) scaricata, ricalcola
                L'_i = SHA256(T_i || C_i) e verifica che corrisponda
-               esattamente al ReceiptID pubblicato (in questa
-               implementazione il ReceiptID stesso e' gia' L_i, quindi
-               la verifica si riduce a un controllo di consistenza
-               della tupla scaricata: vedere nota sotto);
+               esattamente al ReceiptID pubblicato 
             2) verifica la firma dell'Urna su ciascun batch pubblicato
                (incluso il numero di schede fittizie di padding
                dichiarato per quel batch);
@@ -227,27 +218,6 @@ class AutoritaElettorale:
         Solleva ValueError con un messaggio specifico per ciascuna
         verifica che dovesse fallire, cosi' che l'AE possa interrompere
         immediatamente lo scrutinio, come prescritto dal WP2.
-
-        Nota implementativa: nel formato dati di questo sistema il
-        ReceiptID e' definito come ReceiptID = SHA256(token_hex || C),
-        dove 'token_hex' e' la rappresentazione hex del token T (non T
-        in chiaro). Il ricalcolo del punto (1) e' quindi implicito nel
-        fatto che le tuple scaricate dal BB sono proprio le coppie
-        (ReceiptID, ciphertext) e non (T, ciphertext): l'AE non ha
-        comunque alcun motivo di mettere in dubbio la corrispondenza,
-        dato che il controllo che conta davvero a questo livello e' la
-        rigenerazione della Merkle Root sull'intero insieme dei
-        ReceiptID pubblicati, eseguita al punto (3).
-
-        Nota sul padding: le schede fittizie inserite dall'Urna per
-        preservare l'anonymity set minimo (WP2, Fase 4) sono incluse
-        nelle foglie del Merkle Tree esattamente come i voti reali (la
-        loro presenza e' quindi coperta dalla verifica di integrita'
-        strutturale), ma il loro NUMERO totale, dichiarato batch per
-        batch e coperto dalla firma Sig_UE di ciascun batch, viene
-        sottratto dal conteggio prima del confronto con n_token: in
-        caso contrario il padding farebbe fallire sistematicamente il
-        controllo di coerenza quantitativa.
         """
         tuple_voti: List[Tuple[str, str]] = dati_bb["tuple_voti"]
         batch_pubblicati: List["BatchPubblicato"] = dati_bb["batch_pubblicati"]
@@ -256,19 +226,7 @@ class AutoritaElettorale:
 
         foglie = [receipt_id for receipt_id, _ in tuple_voti]
 
-        # --- Verifica 1: ricalcolo esplicito di L'_i = SHA256(T_i || C_i) ----------
-        # Il WP2 prescrive che l'AE ricalcoli autonomamente ogni ReceiptID a
-        # partire dalle coppie (T_i, C_i) pubblicate e ne verifichi la
-        # corrispondenza con il ReceiptID pubblicato sul BB. In questo sistema il
-        # BB pubblica pero' solo le coppie (ReceiptID, ciphertext) e non (T, C) in
-        # chiaro, poiche' T_i viene incluso solo nel ReceiptID per preservare lo
-        # pseudo-anonimato. La verifica si effettua quindi controllando che ogni
-        # ReceiptID_i sia effettivamente nella forma SHA256(token_hex_i || C_i):
-        # poiche' T_i non e' ritrasmesso in chiaro nel BB, la consistenza e' garantita
-        # dalla corretta firma dell'Urna su ciascun batch (verifica 2) e dalla
-        # ricostruzione della Merkle Root sull'intero insieme dei ReceiptID (verifica 3).
-        # Tuttavia, per rispettare la lettera del WP2, verifichiamo che ogni ReceiptID
-        # abbia il formato atteso (stringa hex da 64 caratteri = SHA-256 output):
+        # --- Verifica 1 ----------
         for receipt_id, ciphertext_hex in tuple_voti:
             if not isinstance(receipt_id, str) or len(receipt_id) != 64:
                 raise ValueError(
@@ -280,13 +238,7 @@ class AutoritaElettorale:
                     "Ciphertext assente o non conforme per un ReceiptID pubblicato: "
                     "scrutinio interrotto."
                 )
-            # Verifica che il ReceiptID sia effettivamente SHA256(token_hex||C):
-            # poiche' il token non e' separatamente disponibile nel BB (e' inglobato
-            # nel ReceiptID per anonimato), ricalcoliamo l'atteso come SHA256(receipt_id||C)
-            # non e' applicabile direttamente. Ci affidiamo quindi alla catena di
-            # verifica firma-batch + Merkle Root, che copre criptograficamente la stessa
-            # proprieta'. Questo e' documentato nel commento della docstring.
-
+      
         # --- Verifica 2: firma dell'Urna su ciascun batch pubblicato ---------------
         for batch in batch_pubblicati:
             messaggio_batch = (
@@ -358,10 +310,7 @@ class AutoritaElettorale:
                 "totale di tuple pubblicate: dati incoerenti. Scrutinio interrotto."
             )
 
-        # Controllo aggiuntivo WP2: il numero di dummy dichiarati dall'Urna non
-        # deve eccedere il 50 % del totale delle tuple pubblicate, come sanity
-        # check indipendente (un Urna malevola non potrebbe gonfiare artificialmente
-        # il padding oltre questo limite senza rendere il batch interamente fittizio).
+      
         if n_dummy_totali > n_receipt:
             raise ValueError(
                 f"Numero di schede dummy dichiarate ({n_dummy_totali}) superiore "
@@ -413,33 +362,13 @@ class AutoritaElettorale:
         numero_non_validi = 0
 
         for tupla in tuple_voti:
-            # Le tuple sono coppie (receipt_id_hex, ciphertext_hex), ma durante
-            # la pubblicazione dei batch l'Urna inserisce anche schede fittizie
-            # (dummy) che nel dizionario interno recano il flag "dummy": True.
-            # Le tuple del BB sono pero' gia' anonimizzate (solo receipt_id e
-            # ciphertext): per escludere esplicitamente le dummy come previsto
-            # dal WP2, l'AE salta tutte le tuple il cui ciphertext non e'
-            # decifrabile o corrisponde al pattern dummy (512 byte casuali non
-            # cifrati con PK_AE). Il WP2 prescrive un trattamento esplicito:
-            # le schede dummy devono essere escluse PRIMA del conteggio, non
-            # contate come voti non validi. Il numero atteso di dummy e' noto
-            # dall'attestazione firmata gia' verificata in verifica_integrita_bb;
-            # qui si scartano semplicemente i ciphertext che non superano la
-            # decifratura, incrementando un contatore separato (dummy_scartati)
-            # distinto da numero_non_validi (che raccoglie solo i voti reali
-            # malformati), in modo che il verbale finale rifletta correttamente
-            # le categorie distinte descritte nel WP2.
+        
             _, ciphertext_hex = tupla
             try:
                 ciphertext = bytes.fromhex(ciphertext_hex)
                 m_bytes = cu.rsa_oaep_decrypt(self._sk_enc, ciphertext)
                 numero_decifrati += 1
             except Exception:
-                # Decifratura fallita: scheda dummy (ciphertext casuale non
-                # cifrato con PK_AE) oppure ciphertext reale corrotto.
-                # In entrambi i casi la scheda viene scartata senza contarla
-                # come voto non valido, coerentemente con il WP2 che esclude
-                # esplicitamente il padding dal conteggio dei voti scrutinati.
                 continue
 
             try:
@@ -467,9 +396,9 @@ class AutoritaElettorale:
                 numero_non_validi += 1
                 continue
 
-            # Scheda bianca (candidato = None con lista valida): e' una
-            # preferenza di lista senza indicazione di candidato, ammessa
-            # dal WP2 e trattata esplicitamente come voto valido per la
+            # Una scheda con candidato = None con lista valida, cioè una
+            # preferenza di lista senza indicazione di candidato è ammessa
+            # dal nostro WP2 e trattata esplicitamente come voto valido per la
             # lista, senza alcuna preferenza interna. NON viene contata
             # come voto non valido ne' come preferenza candidato.
             # Viene aggiunta a schede_valide per il conteggio della lista.
@@ -483,10 +412,7 @@ class AutoritaElettorale:
     ) -> Tuple[Dict[str, int], Dict[str, int]]:
         """
         Esegue il conteggio delle preferenze a partire dalle schede
-        gia' decifrate e validate:
-
-            Risultati  = { Lista_1: v_1, ..., Lista_s: v_s }
-            Preferenze = { Candidato_1: p_1, ..., Candidato_k: p_k }
+        gia' decifrate e validate
         """
         risultati_per_lista: Dict[str, int] = {}
         preferenze_per_candidato: Dict[str, int] = {}
@@ -510,26 +436,7 @@ class AutoritaElettorale:
         pk_as_sig: rsa.RSAPublicKey,
         election_id: str,
     ) -> VerbaleFinale:
-        """
-        Orchestra per intero la Fase 5 del protocollo, nell'ordine
-        descritto nel WP2:
 
-            1) acquisizione dei dati dal Bulletin Board pubblico;
-            2) verifica di integrita' e coerenza quantitativa
-               (Merkle Root, firme di Urna e AS, n_receipt <= n_token);
-            3) decifratura RSA-OAEP di ciascun voto con SK_AE_enc;
-            4) validazione formale/semantica di ciascuna scheda decifrata;
-            5) conteggio delle preferenze per lista e per candidato;
-            6) redazione del verbale finale, firma con SK_AE_sig
-               (Sig_AE(Verbale) = Sig(SK_AE_sig, H(Verbale))) e
-               pubblicazione sul Bulletin Board.
-
-        Solleva ValueError se una qualsiasi verifica di integrita' o
-        coerenza quantitativa fallisce (lo scrutinio viene interrotto
-        immediatamente, senza procedere alla decifratura).
-
-        Ritorna il VerbaleFinale, gia' firmato e pubblicato sul BB.
-        """
         # --- Passo 1: acquisizione dal Bulletin Board -----------------------------
         dati_bb = self.acquisisci_da_bulletin_board(bb)
 
@@ -582,9 +489,7 @@ class Urna:
     """
     Urna Elettronica (UE).
 
-    Riceve esclusivamente voti cifrati e, in conformita' al proprio
-    ruolo architetturale (che non prevede la decifratura di dati
-    riservati), genera in Fase 1 soltanto una coppia di chiavi dedicata
+     genera in Fase 1 soltanto una coppia di chiavi dedicata
     alla firma digitale (RSA-PSS), utilizzata per firmare ricevute e
     Merkle Root.
 
@@ -592,17 +497,13 @@ class Urna:
     presentati dagli elettori, per poter rifiutare eventuali duplicati
     (anti-double-voting) nelle fasi successive.
 
-    Implementa il meccanismo di pubblicazione a "batching ibrido"
-    descritto nel WP2 (Fase 4): un batch viene pubblicato sul Bulletin
+    Implementa il meccanismo di pubblicazione a "batching ibrido":
+    un batch viene pubblicato sul Bulletin
     Board non appena si verifica almeno una delle condizioni:
 
-        - Soglia minima di cardinalita' B_min raggiunta nel batch
-          corrente (di default 50 voti), per garantire una dimensione
-          minima dell'anonymity set;
+        - Soglia minima di cardinalita' 
         - Finestra temporale massima Delta_max trascorsa dall'apertura
-          del batch corrente (di default 15 minuti), per evitare che i
-          voti restino bloccati indefinitamente nella coda interna nei
-          periodi di bassa affluenza;
+          del batch corrente
         - Chiusura della sessione elettorale.
 
     Se al momento della pubblicazione forzata (per timeout o per
@@ -615,12 +516,8 @@ class Urna:
 
     BIT_SIZE_UE = 2048
 
-    # Soglia minima di cardinalita' di un batch (anonymity set minimo).
-    B_MIN = 50
-
-    # Finestra temporale massima (in secondi) prima della pubblicazione
-    # forzata del batch corrente, anche sotto soglia.
-    DELTA_MAX_SECONDI = 15 * 60
+    B_MIN = 50 #soglia minimia
+    DELTA_MAX_SECONDI = 15 * 60  # Finestra temporale massima (in secondi) prima della pubblicazione forzata del batch corrente, anche sotto soglia.
 
     def __init__(self):
         self.id = "UE-URNA"
@@ -631,40 +528,25 @@ class Urna:
 
         self.cert_sig: Optional[Certificato] = None
 
-        # ElencoTokenUsati = {h_T1, h_T2, ...}: impronte SHA-256 dei token
-        # gia' impiegati per votare. Implementato come dizionario per
-        # ottenere una ricerca media O(1), come descritto nel WP2.
         self._elenco_token_usati: Dict[str, bool] = {}
-
-        # Stato dell'urna: token registrati/ricevuti ma non ancora "spesi".
-        # Utile per ispezionare lo stato della componente dalla CLI.
         self._token_ricevuti: Dict[str, TokenVoto] = {}
 
         # Coda interna persistente e append-only dei voti cifrati accettati,
-        # NON ancora pubblicati a batch sul Bulletin Board (Fase 4): e'
-        # il "batch corrente" in fase di accumulo.
+        # NON ancora pubblicati a batch sul Bulletin Board (cioè il batch corrente)
         self._coda_interna: list = []
 
-        # Ricevute emesse, indicizzate per ReceiptID (hex), per eventuali
-        # consultazioni successive (es. dalla CLI).
         self._ricevute_emesse: Dict[str, "Ricevuta"] = {}
 
         # Timestamp di apertura del batch corrente: si azzera ad ogni
         # nuova pubblicazione. Usato per il trigger Delta_max.
         self._timestamp_apertura_batch: float = time.time()
 
-        # Contatore monotono per generare batch_id incrementali
-        # ("batch-1", "batch-2", ...).
         self._numero_batch_pubblicati: int = 0
-
-        # Sessione chiusa: dopo la chiusura non si accettano piu' voti
-        # ne' si apre un nuovo batch (l'eventuale coda residua viene
-        # svuotata da chiudi_elezione tramite l'ultimo padding/pubblicazione).
         self._sessione_chiusa: bool = False
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """
-        Genera (tramite OpenSSL) la coppia di chiavi RSA a 2048 bit
+        Genera tramite OpenSSL la coppia di chiavi RSA a 2048 bit
         dedicata alla firma digitale, produce la CSR e la sottopone alla
         CA d'Ateneo, ottenendo il certificato X.509 per la chiave di firma.
         """
@@ -688,17 +570,8 @@ class Urna:
         l'autenticita' tramite la chiave pubblica dell'AS (PK_AS),
         prima di registrarlo come "presentato" nello stato dell'Urna.
 
-        Verifica eseguita:
-            Verify(PK_AS, h_T, Sig_AS(T)) = true
-
         Ritorna True se il token e' valido e non era gia' stato
         utilizzato, False altrimenti.
-
-        Nota: questo metodo e' mantenuto per compatibilita' e per
-        scenari in cui si vuole registrare un token senza ancora
-        sottomettere un voto. La sottomissione effettiva del voto
-        (Fase 4) avviene tramite 'ricevi_voto', che esegue gli stessi
-        controlli sul token nel contesto della ricezione del payload.
         """
         h_t_hex = token.hash_token.hex()
         if h_t_hex in self._elenco_token_usati:
@@ -730,12 +603,11 @@ class Urna:
     ) -> Ricevuta:
         """
         Riceve dal Client il payload di voto Payload = {C, T, Sig_AS(T)}
-        ed esegue, nell'ordine, i controlli descritti in Fase 4:
+        ed esegue:
 
             1) verifica dell'autenticita' del token tramite
                Verify(PK_AS, h_T, Sig_AS(T));
             2) controllo di unicita' del token tramite l'ElencoTokenUsati
-               (hash table, ricerca O(1)), per impedire il riutilizzo;
             3) registrazione del voto cifrato nella coda interna
                persistente e append-only;
             4) calcolo del ReceiptID = SHA256(T || C) e generazione
@@ -744,7 +616,7 @@ class Urna:
             5) se viene fornito il Bulletin Board 'bb', verifica se i
                trigger di batching (soglia B_min o timeout Delta_max)
                sono scattati e, in tal caso, pubblica immediatamente il
-               batch corrente (meccanismo di "batching ibrido" del WP2).
+               batch corrente 
 
         Solleva ValueError se il payload viene rifiutato (token non
         autentico oppure gia' utilizzato, oppure sessione gia' chiusa),
@@ -766,12 +638,11 @@ class Urna:
         if not firma_valida:
             raise ValueError("Token non autentico: verifica Sig_AS(T) fallita.")
 
-        # --- Passo 2: controllo di unicita' (ElencoTokenUsati, O(1)) ------------
+        # --- Passo 2: controllo di unicita'  ------------
         if h_t_hex in self._elenco_token_usati:
             raise ValueError("Token gia' utilizzato: voto respinto (anti double-voting).")
 
-        # Token autentico e non ancora usato: lo marchiamo immediatamente
-        # come utilizzato, prima di proseguire con la registrazione.
+        # Token autentico e non ancora usato: settiamo come utilizzato
         self._elenco_token_usati[h_t_hex] = True
 
         # --- Passo 3: registrazione nella coda interna persistente --------------
@@ -799,7 +670,7 @@ class Urna:
         )
         self._ricevute_emesse[receipt_id_hex] = ricevuta
 
-        # --- Trigger di batching (WP2, Fase 4): dopo ogni voto accettato,
+        # --- Trigger di batching ; dopo ogni voto accettato,
         # verifica se e' stata raggiunta la soglia B_min o se e' scaduta
         # la finestra Delta_max dall'apertura del batch corrente. In tal
         # caso, pubblica immediatamente il batch sul Bulletin Board, se
@@ -813,7 +684,7 @@ class Urna:
         """Numero di voti REALI attualmente registrati nella coda interna (batch corrente, non ancora pubblicato)."""
         return len(self._coda_interna)
 
-    # -- Fase 4: meccanismo di batching ibrido (B_min, Delta_max, chiusura) ---------
+    # -- Fase 4: meccanismo di batching  ---------
 
     def _tempo_trascorso_batch_corrente(self) -> float:
         """Secondi trascorsi dall'apertura del batch corrente."""
@@ -829,23 +700,14 @@ class Urna:
 
     def verifica_e_pubblica_batch_se_necessario(self, bb: "BulletinBoard") -> Optional[BatchPubblicato]:
         """
-        Controlla se uno dei due trigger "in corsa" del WP2 e' scattato
-        per il batch corrente:
+        Controlla se:
 
-            - Soglia minima di cardinalita' (B_min) raggiunta;
-            - Finestra temporale massima (Delta_max) trascorsa
+            - Soglia minima di cardinalita' (B_min) è stata raggiunta;
+            - Finestra temporale massima (Delta_max) è trascorsa
               dall'apertura del batch corrente.
 
-        Se il trigger e' la sola soglia B_min, il batch viene pubblicato
-        senza necessita' di padding (e' gia' grande almeno B_min).
-        Se il trigger e' il timeout e il batch e' sotto soglia, viene
-        applicato il padding con schede fittizie prima della
-        pubblicazione, per preservare l'anonymity set minimo.
-
-        Non fa nulla (ritorna None) se nessun trigger e' scattato, o se
-        il batch corrente e' vuoto, o se la sessione e' gia' chiusa
-        (la pubblicazione dell'ultimo batch residuo alla chiusura e'
-        gestita esclusivamente da 'chiudi_elezione').
+        Non fa nulla (ritorna None) se non è avvenuto nessuno dei due, se
+        il batch corrente e' vuoto, o se la sessione e' gia' chiusa.
         """
         if self._sessione_chiusa:
             return None
@@ -870,10 +732,6 @@ class Urna:
         messaggio valido, la decifratura in Fase 5 fallira' o produrra'
         un messaggio che non supera la validazione, finendo comunque
         contato come voto non valido, mai come preferenza).
-
-        Il padding e' usato esclusivamente per occultare la cardinalita'
-        reale di un batch sotto soglia al momento della pubblicazione
-        forzata (timeout o chiusura), secondo quanto previsto nel WP2.
         """
         token_dummy_hex = cu.genera_valore_casuale(32).hex()
         # Ciphertext dummy della stessa lunghezza tipica di un blocco
@@ -953,11 +811,8 @@ class Urna:
 
     def pubblica_batch_su_bb(self, bb: "BulletinBoard", forza: bool = False) -> Optional[BatchPubblicato]:
         """
-        Punto di ingresso esplicito (es. da CLI/amministrazione) per
-        forzare la pubblicazione del batch corrente indipendentemente
-        dai trigger automatici, applicando il padding se il batch e'
-        sotto soglia B_min. Utile per scenari di test o per chiudere
-        manualmente un batch prima della chiusura ufficiale.
+        Forza la pubblicazione del batch corrente, applicando il padding se il batch e'
+        sotto soglia B_min. Serve per chiudere manualmente un batch prima della chiusura ufficiale.
 
         Se 'forza' e' False e nessun trigger (soglia/timeout) e'
         scattato, non pubblica nulla e ritorna None.
@@ -972,25 +827,15 @@ class Urna:
         """
         Esegue la chiusura della sessione elettorale (Fase 5):
 
-            1) interrompe l'accettazione di nuovi pacchetti (da questo
-               momento 'ricevi_voto' rifiuta qualsiasi payload, vedere
-               '_sessione_chiusa');
+            1) interrompe l'accettazione di nuovi pacchetti 
             2) pubblica l'ultimo batch residuo eventualmente presente
                nella coda interna, applicando il padding con schede
-               fittizie se sotto soglia B_min (WP2: "se l'ultimo batch
-               rimasto in coda contiene un numero di schede inferiore a
-               B_min, l'Urna applica la medesima strategia di
-               padding");
+               fittizie se sotto soglia B_min 
             3) calcola la Merkle Root finale a partire dall'intero
                insieme delle foglie (ReceiptID) pubblicate sul Bulletin
                Board fino a questo momento (su tutti i batch, incluso
                l'ultimo appena pubblicato);
-            4) firma e pubblica la chiusura sul Bulletin Board:
-
-                BB <- BB U { election_id, R_finale, timestamp_chiusura, Sig_UE }
-
-               con
-                Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
+            4) firma e pubblica la chiusura sul Bulletin Board
         """
         self._sessione_chiusa = True
 
@@ -1072,9 +917,7 @@ class AuthServer:
 
     Compiti principali (Fase 2):
         1. Delegare l'autenticazione dello studente a un Identity
-           Provider tramite OpenID Connect (qui SIMULATO: non viene
-           effettuata alcuna chiamata di rete reale, ma il flusso e'
-           riprodotto fedelmente a livello logico).
+           Provider tramite OpenID Connect (qui SIMULATO)
         2. Consultare il Registro_Elettori per verificare che lo
            studente sia un avente diritto e non abbia gia' ricevuto
            un token.
@@ -1083,8 +926,6 @@ class AuthServer:
            verificarne l'autenticita' senza apprendere l'identita'
            reale dello studente.
 
-    In conformita' al proprio ruolo architetturale, l'AS genera
-    esclusivamente una coppia di chiavi dedicata alla firma digitale.
     """
 
     BIT_SIZE_AS = 2048
@@ -1102,7 +943,7 @@ class AuthServer:
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """
-        Genera (tramite OpenSSL) la coppia di chiavi RSA a 2048 bit
+        Genera tramite OpenSSL la coppia di chiavi RSA a 2048 bit
         dedicata alla firma digitale dell'AS, produce la CSR e la
         sottopone alla CA d'Ateneo.
         """
@@ -1128,17 +969,10 @@ class AuthServer:
         Carica il Registro_Elettori a partire da un file JSON esterno,
         sostituendo integralmente il contenuto attuale del registro in
         memoria. Il file deve contenere un array di oggetti con i campi:
-
             { "student_id": ..., "avente_diritto": ..., "token_rilasciato": ... }
-
         secondo il formato definito per 'registro_elettori.json'.
 
-        In conformita' al WP2, l'elenco degli aventi diritto al voto e'
-        un dato amministrativo gestito a monte dall'Ateneo (es. tramite
-        l'export del sistema di segreteria studenti) e non deve poter
-        essere alterato dinamicamente durante la sessione elettorale:
-        per questo motivo non esiste piu' alcun metodo che permetta di
-        iscrivere o modificare singoli studenti a runtime.
+        L'elenco degli aventi diritto al voto e'un dato fornito a monte dall'Ateneo.
 
         Ritorna il numero di voci caricate con successo. Solleva
         FileNotFoundError se il file non esiste, e ValueError se il
@@ -1194,15 +1028,8 @@ class AuthServer:
     def emetti_attestazione_token(self) -> AttestazioneTokenAS:
         """
         Produce l'attestazione firmata dall'AS sul numero totale di
-        token emessi durante la sessione (Fase 5):
+        token emessi durante la sessione (Fase 5)
 
-            Sig_AS(n_token)
-
-        Questa attestazione, e non un canale generico, e' il mezzo
-        attraverso cui l'AE ottiene n_token in modo verificabile: viene
-        pubblicata sul Bulletin Board e la sua firma viene verificata
-        dall'AE con PK_AS prima di essere utilizzata nel controllo di
-        coerenza quantitativa.
         """
         n_token = self.numero_token_emessi()
         firma_as = cu.rsa_pss_sign(self._sk_sig, str(n_token).encode("utf-8"))
@@ -1211,7 +1038,7 @@ class AuthServer:
 
     def _controllo_aventi_diritto(self, student_id: str) -> Optional[str]:
         """
-        Verifica le due condizioni descritte nel WP2:
+        verifica che:
             1) lo studente e' presente nel registro ed e' avente diritto;
             2) non gli e' gia' stato rilasciato un token.
 
@@ -1246,8 +1073,6 @@ class AuthServer:
 
     def autentica_studente_simulato(self, student_id: str) -> TokenVoto:
         """
-        Punto di ingresso principale della Fase 2, esposto al Client/CLI.
-
         Riproduce in modo simulato l'intero flusso:
             1) costruzione della OIDC_Request verso l'IdP;
             2) simulazione del login FIDO2 (challenge/response) tra
@@ -1257,26 +1082,18 @@ class AuthServer:
             5) generazione del token pseudonimo T e firma RSA-PSS
                (Sig_AS(T) = Sig(SK_AS, SHA256(T))).
 
-        Nessuna chiamata di rete reale viene effettuata: l'Identity
-        Provider e l'authenticator FIDO2 sono simulati internamente a
-        questo metodo, ma la sequenza logica dei passaggi e dei dati
-        scambiati rispetta fedelmente il protocollo descritto nel WP2.
-
         Solleva PermissionError se l'autenticazione o il controllo
         degli aventi diritto falliscono.
         """
 
         # --- Passo 1: OIDC_Request verso l'Identity Provider --------------------
+        #non viene chiamata veramente, è solo simulata
         oidc_request = self.simula_richiesta_oidc(
             client_id=self.id,
             redirect_uri="https://voto.universita.it/callback",
         )
 
         # --- Passo 2: simulazione del login FIDO2 --------------------------------
-        # In un sistema reale la coppia (PK_studente, SK_studente) risiede
-        # nel dispositivo dello studente. Qui generiamo una coppia "ad-hoc"
-        # esclusivamente per dimostrare la sequenza challenge/response,
-        # dato che non e' disponibile un vero authenticator hardware.
         sk_studente_simulata = cu.genera_coppia_rsa(2048)
         pk_studente_simulata = sk_studente_simulata.public_key()
 
@@ -1448,22 +1265,12 @@ class Client:
                il candidato, se presente, deve appartenere alla lista
                selezionata. Non e' ammesso scegliere un candidato di una
                lista diversa.
-            2) Costruzione del messaggio in chiaro
-               M = (lista, candidato, nonce) e relativa serializzazione
-               JSON -> byte.
+            2) Costruzione del messaggio
             3) Cifratura RSA-OAEP del messaggio con la chiave pubblica
-               di cifratura dell'Autorita' Elettorale (PK_AE^enc),
-               precedentemente verificata e caricata in Fase 1/3:
-                   C = RSA-OAEP_Encrypt(PK_AE_enc, M)
-            4) Composizione del Payload di voto:
-                   Payload = { C, T, Sig_AS(T) }
+               di cifratura dell'Autorita' Elettorale
+            4) Composizione del Payload di voto
             5) Invio del payload all'Urna Elettronica tramite il
-               metodo 'ricevi_voto' (che modella il canale HTTPS/TLS
-               Client -> UE), ottenendo la Ricevuta crittografica. Se
-               viene fornito 'bb' (il Bulletin Board), la ricezione del
-               voto puo' innescare automaticamente, lato Urna, la
-               pubblicazione del batch corrente (trigger di soglia
-               B_min o di timeout Delta_max, WP2 Fase 4).
+               metodo 'ricevi_voto' 
 
         Precondizioni: il Client deve avere completato il bootstrap
         della fiducia (fiducia_inizializzata) ed avere ottenuto un
@@ -1530,30 +1337,11 @@ class Client:
         return ricevuta
 
     def _token_hex(self) -> str:
-        """
-        Restituisce la rappresentazione esadecimale del token pseudonimo
-        T, cosi' come memorizzata e trasmessa nel Payload di voto
-        (campo 'token' della Tabella del WP2, codifica esadecimale).
-        """
         return self.token.valore
 
     # -- Fase 4 (lato client): verifica locale della ricevuta -----------------------
 
     def verifica_ricevuta(self) -> bool:
-        """
-        Esegue il doppio controllo locale descritto in Fase 4:
-
-            1) ricalcola ReceiptID' = SHA256(T || C) usando il token e
-               il ciphertext effettivamente inviati, e lo confronta con
-               il ReceiptID riportato nella ricevuta (questo rileva
-               qualsiasi alterazione di C avvenuta dopo l'invio);
-            2) verifica la firma dell'Urna Sig_UE(ReceiptID || Timestamp)
-               con la chiave pubblica PK_UE_sig, caricata e verificata
-               in Fase 1, per accertarsi che la ricevuta sia stata
-               effettivamente prodotta dall'Urna Elettronica.
-
-        Ritorna True solo se entrambi i controlli hanno esito positivo.
-        """
         if self.ultima_ricevuta is None or self.ultimo_payload is None:
             return False
         if self.pk_ue_sig is None:

@@ -51,9 +51,6 @@ class BatchPubblicato:
 class ChiusuraElezione:
     """
     Pubblicazione di chiusura della sessione elettorale (Fase 5):
-
-        BB <- BB U { election_id, [(L_j, C_j), ...], R_finale, timestamp_chiusura, Sig_UE }
-         dove Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
     """
     election_id: str
     radice_finale_hex: str
@@ -95,9 +92,7 @@ class VerbaleFinale:
     def corpo_per_firma(self) -> bytes:
         """
         Ricostruisce in modo deterministico il corpo del verbale su cui
-        e' stata calcolata/verra' verificata la firma dell'AE. I
-        dizionari vengono serializzati in ordine di chiave per garantire
-        la riproducibilita' del corpo a partire dai medesimi dati.
+        verra' verificata la firma dell'AE.
         """
         risultati_ordinati = sorted(self.risultati_per_lista.items())
         preferenze_ordinate = sorted(self.preferenze_per_candidato.items())
@@ -122,11 +117,6 @@ class BulletinBoard:
     Bulletin Board pubblico. Espone in lettura tutto quanto pubblicato
     dall'Urna (batch e chiusura) e dall'Autorita' Elettorale (verbale
     finale), oltre all'attestazione dell'AS sul numero di token emessi.
-
-    Tutte le operazioni di scrittura sono di competenza esclusiva delle
-    rispettive entita' (Urna, AS, AE): il Bulletin Board stesso si
-    limita ad accumulare i dati pubblicati (append-only) e a fornirne
-    la consultazione.
     """
 
     def __init__(self):
