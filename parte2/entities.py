@@ -29,8 +29,10 @@ lasciate come estensioni future.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -741,20 +743,63 @@ class AuthServer:
             uso="Firma Digitale",
         )
 
+
     # -- Gestione del registro degli aventi diritto --------------------------------
 
-    def iscrivi_studente(self, student_id: str, avente_diritto: bool = True) -> None:
+    def carica_registro_da_file(self, percorso_file: str) -> int:
         """
-        Inserisce (o aggiorna) una riga nel Registro_Elettori per lo
-        studente indicato. Operazione tipicamente eseguita "a monte"
-        dall'amministrazione universitaria, qui esposta per comodita'
-        di test/demo nella CLI.
+        Carica il Registro_Elettori a partire da un file JSON esterno,
+        sostituendo integralmente il contenuto attuale del registro in
+        memoria. Il file deve contenere un array di oggetti con i campi:
+
+            { "student_id": ..., "avente_diritto": ..., "token_rilasciato": ... }
+
+        secondo il formato definito per 'registro_elettori.json'.
+
+        In conformita' al WP2, l'elenco degli aventi diritto al voto e'
+        un dato amministrativo gestito a monte dall'Ateneo (es. tramite
+        l'export del sistema di segreteria studenti) e non deve poter
+        essere alterato dinamicamente durante la sessione elettorale:
+        per questo motivo non esiste piu' alcun metodo che permetta di
+        iscrivere o modificare singoli studenti a runtime.
+
+        Ritorna il numero di voci caricate con successo. Solleva
+        FileNotFoundError se il file non esiste, e ValueError se il
+        contenuto non e' nel formato atteso (array JSON di oggetti con
+        i campi richiesti).
         """
-        self._registro_elettori[student_id] = RegistroElettoreEntry(
-            student_id=student_id,
-            avente_diritto=avente_diritto,
-            token_rilasciato=False,
-        )
+        path = Path(percorso_file)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"File del Registro_Elettori non trovato: '{percorso_file}'."
+            )
+
+        with path.open("r", encoding="utf-8") as f:
+            dati = json.load(f)
+
+        if not isinstance(dati, list):
+            raise ValueError(
+                "Il file del Registro_Elettori deve contenere un array JSON "
+                "di oggetti, uno per ciascuno studente."
+            )
+
+        nuovo_registro: Dict[str, RegistroElettoreEntry] = {}
+        for indice, voce in enumerate(dati):
+            if not isinstance(voce, dict) or "student_id" not in voce or "avente_diritto" not in voce:
+                raise ValueError(
+                    f"Voce non valida in posizione {indice} del Registro_Elettori: "
+                    "richiesti almeno i campi 'student_id' e 'avente_diritto'."
+                )
+
+            student_id = str(voce["student_id"])
+            nuovo_registro[student_id] = RegistroElettoreEntry(
+                student_id=student_id,
+                avente_diritto=bool(voce["avente_diritto"]),
+                token_rilasciato=bool(voce.get("token_rilasciato", False)),
+            )
+
+        self._registro_elettori = nuovo_registro
+        return len(self._registro_elettori)
 
 
     def numero_token_emessi(self) -> int:

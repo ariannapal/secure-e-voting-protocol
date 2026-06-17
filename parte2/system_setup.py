@@ -40,18 +40,30 @@ class SistemaVoto:
     verbale: VerbaleFinale | None = None
 
 
-def inizializza_sistema() -> SistemaVoto:
+PERCORSO_REGISTRO_ELETTORI_DEFAULT = "registro_elettori.json"
+
+def inizializza_sistema(
+    percorso_registro_elettori: str = PERCORSO_REGISTRO_ELETTORI_DEFAULT,
+) -> SistemaVoto:
     """
     Esegue per intero la Fase 1 del protocollo:
         - generazione delle chiavi RSA per AE (4096 bit, doppia coppia),
           Urna e AS (2048 bit, sola firma);
         - certificazione di tutte le chiavi pubbliche tramite la CA
-          universitaria d'Ateneo.
+          universitaria d'Ateneo;
+        - caricamento del Registro_Elettori da file esterno
+          (registro_elettori.json), in conformita' al principio per cui
+          l'elenco degli aventi diritto al voto e' un dato amministrativo
+          gestito a monte e non modificabile dinamicamente a runtime.
 
     Carica inoltre la configurazione elettorale (liste e candidati)
     della consultazione corrente, in conformita' al principio di
     riusabilita' dell'infrastruttura software (dati di sessione
     separati dal codice delle componenti core).
+
+    Solleva FileNotFoundError o ValueError se il file del Registro_Elettori
+    non esiste o non e' nel formato atteso (vedere
+    'AuthServer.carica_registro_da_file').
 
     Ritorna un oggetto SistemaVoto con tutte le componenti pronte.
     """
@@ -67,6 +79,10 @@ def inizializza_sistema() -> SistemaVoto:
     ae.richiedi_certificazione(ca)
     urna.richiedi_certificazione(ca)
     auth_server.richiedi_certificazione(ca)
+
+    # Caricamento del Registro_Elettori da file esterno (dato amministrativo
+    # gestito a monte, non alterabile dinamicamente durante la sessione).
+    auth_server.carica_registro_da_file(percorso_registro_elettori)
 
     return SistemaVoto(
         ca=ca,

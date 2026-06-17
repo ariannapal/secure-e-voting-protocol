@@ -45,45 +45,37 @@ def stampa_intestazione(testo: str) -> None:
 def stampa_menu() -> None:
     print("\nMenu principale - Sistema di Voto Elettronico Universitario")
     print("-" * 60)
-    print("1. Inizializza sistema (Fase 1: CA, chiavi, certificati)")
-    print("2. Iscrivi studente come avente diritto al voto")
-    print("3. Bootstrap fiducia Client (scarica/verifica certificati)")
-    print("4. Autenticati (simulazione OIDC + FIDO2) e ottieni token")
-    print("5. Vota (cifra la scheda e invia il voto all'Urna)")
-    print("6. Mostra stato del sistema")
-    print("7. Verifica localmente il proprio token (lato Client)")
-    print("8. Verifica localmente la propria ricevuta di voto (lato Client)")
-    print("9. Chiudi elezione ed esegui lo scrutinio (Fase 5)")
+    print("1. Inizializza sistema (Fase 1: CA, chiavi, certificati,Registro_Elettori)") 
+    print("2. Bootstrap fiducia Client (scarica/verifica certificati)")
+    print("3. Autenticati (simulazione OIDC + FIDO2) e ottieni token")
+    print("4. Vota (cifra la scheda e invia il voto all'Urna)")
+    print("5. Mostra stato del sistema")
+    print("6. Verifica localmente il proprio token (lato Client)")
+    print("7. Verifica localmente la propria ricevuta di voto (lato Client)")
+    print("8. Chiudi elezione ed esegui lo scrutinio (Fase 5)")
     print("0. Esci")
 
 
 def azione_inizializza_sistema(ctx: ContestoCLI) -> None:
     stampa_intestazione("FASE 1 - Setup iniziale e PKI")
     print("Generazione delle chiavi RSA in corso (potrebbe richiedere alcuni secondi)...")
-    ctx.sistema = inizializza_sistema()
+    print("Caricamento del Registro_Elettori da 'registro_elettori.json'...")
+
+    try:
+        ctx.sistema = inizializza_sistema()
+    except FileNotFoundError as e:
+        print(f"\n[Errore] {e}")
+        return
+    except ValueError as e:
+        print(f"\n[Errore] Registro_Elettori non valido: {e}")
+        return
+
     print("\nSistema inizializzato correttamente:")
     print(f"  - CA:         {ctx.sistema.ca.nome}")
     print(f"  - {ctx.sistema.ae!r}")
     print(f"  - {ctx.sistema.urna!r}")
     print(f"  - {ctx.sistema.auth_server!r}")
 
-
-def azione_iscrivi_studente(ctx: ContestoCLI) -> None:
-    if ctx.sistema is None:
-        print("\n[Errore] Devi prima inizializzare il sistema (opzione 1).")
-        return
-
-    student_id = input("Inserisci lo student_ID da iscrivere: ").strip()
-    if not student_id:
-        print("[Errore] student_ID non valido.")
-        return
-
-    risposta = input("E' avente diritto al voto? [s/n] (default: s): ").strip().lower()
-    avente_diritto = risposta != "n"
-
-    ctx.sistema.auth_server.iscrivi_studente(student_id, avente_diritto=avente_diritto)
-    stato = "avente diritto" if avente_diritto else "NON avente diritto"
-    print(f"\nStudente '{student_id}' iscritto nel Registro_Elettori come {stato}.")
 
 
 def azione_bootstrap_client(ctx: ContestoCLI) -> None:
@@ -356,20 +348,18 @@ def main() -> None:
         if scelta == "1":
             azione_inizializza_sistema(ctx)
         elif scelta == "2":
-            azione_iscrivi_studente(ctx)
-        elif scelta == "3":
             azione_bootstrap_client(ctx)
-        elif scelta == "4":
+        elif scelta == "3":
             azione_autenticati(ctx)
-        elif scelta == "5":
+        elif scelta == "4":
             azione_vota(ctx)
-        elif scelta == "6":
+        elif scelta == "5":
             azione_mostra_stato(ctx)
-        elif scelta == "7":
+        elif scelta == "6":
             azione_verifica_token_locale(ctx)
-        elif scelta == "8":
+        elif scelta == "7":
             azione_verifica_ricevuta(ctx)
-        elif scelta == "9":
+        elif scelta == "8":
             azione_esegui_scrutinio(ctx)
         elif scelta == "0":
             print("Uscita dal sistema. Arrivederci.")
