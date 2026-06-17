@@ -61,7 +61,7 @@ def configurazione_demo() -> ConfigurazioneElettorale:
     CLI e per i test, con alcune liste e candidati gia' precaricati.
     """
     cfg = ConfigurazioneElettorale()
-    cfg.aggiungi_lista("Lista A - Studenti Uniti", ["Anna Bianchi", "Luca Verdi"])
-    cfg.aggiungi_lista("Lista B - Innovazione Universitaria", ["Marco Neri", "Sara Gialli"])
-    cfg.aggiungi_lista("Lista C - Voce Studentesca", [])  # lista senza preferenza interna
+    cfg.aggiungi_lista("Lista A - StudentiIngegneria", ["Marco Rossi", "Chiara Bianchi"])
+    cfg.aggiungi_lista("Lista B - Agora'", ["Andrea Russo", "Francesca Ferrari"])
+    cfg.aggiungi_lista("Lista C - Asem", ["Lorenzo Esposito", "Giorgia Ricci"]) 
     return cfg
