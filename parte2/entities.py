@@ -139,260 +139,7 @@ class AutoritaElettorale:
             uso="Firma Digitale",
         )
 
-    def __repr__(self) -> str:
-        certificata = self.cert_enc is not None and self.cert_sig is not None
-        return f"AutoritaElettorale(id={self.id}, certificata={certificata})"
-
-
-# ---------------------------------------------------------------------------
-# Urna Elettronica (UE)
-# ---------------------------------------------------------------------------
-
-class Urna:
-    """
-    Urna Elettronica (UE).
-
-    Riceve esclusivamente voti cifrati (non implementato in questa
-    versione di base) e, in conformita' al proprio ruolo architetturale
-    (che non prevede la decifratura di dati riservati), genera in Fase 1
-    soltanto una coppia di chiavi dedicata alla firma digitale (RSA-PSS),
-    utilizzata per firmare ricevute e Merkle Root.
-
-    Mantiene inoltre uno stato persistente dei token pseudonimi
-    presentati dagli elettori, per poter rifiutare eventuali duplicati
-    (anti-double-voting) nelle fasi successive.
-    """
-
-    BIT_SIZE_UE = 2048
-
-    def __init__(self):
-        self.id = "UE-URNA"
-
-        self._sk_sig: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_UE)
-        self.pk_sig: rsa.RSAPublicKey = self._sk_sig.public_key()
-
-        self.cert_sig: Optional[Certificato] = None
-
-        # ElencoTokenUsati = {h_T1, h_T2, ...}: impronte SHA-256 dei token
-        # gia' impiegati per votare. Implementato come dizionario per
-        # ottenere una ricerca media O(1), come descritto nel WP2.
-        self._elenco_token_usati: Dict[str, bool] = {}
-
-        # Stato dell'urna: token registrati/ricevuti ma non ancora "spesi".
-        # Utile per ispezionare lo stato della componente dalla CLI.
-        self._token_ricevuti: Dict[str, TokenVoto] = {}
-
-        # Coda interna persistente e append-only dei voti cifrati accettati,
-        # non ancora pubblicati a batch sul Bulletin Board (Fase 4).
-        self._coda_interna: list = []
-
-        # Ricevute emesse, indicizzate per ReceiptID (hex), per eventuali
-        # consultazioni successive (es. dalla CLI).
-        self._ricevute_emesse: Dict[str, "Ricevuta"] = {}
-
-    def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
-        """Ottiene il certificato X.509 per la propria chiave di firma."""
-        self.cert_sig = ca.emetti_certificato(
-            id_soggetto=self.id,
-            chiave_pubblica=self.pk_sig,
-            uso="Firma Digitale",
-        )
-
-    def registra_token(self, token: TokenVoto, pk_as: rsa.RSAPublicKey) -> bool:
-        """
-        Riceve un token pseudonimo di voto dal Client e ne verifica
-        l'autenticita' tramite la chiave pubblica dell'AS (PK_AS),
-        prima di registrarlo come "presentato" nello stato dell'Urna.
-
-        Verifica eseguita:
-            Verify(PK_AS, h_T, Sig_AS(T)) = true
-
-        Ritorna True se il token e' valido e non era gia' stato
-        utilizzato, False altrimenti.
-
-        Nota: questo metodo e' mantenuto per compatibilita' e per
-        scenari in cui si vuole registrare un token senza ancora
-        sottomettere un voto. La sottomissione effettiva del voto
-        (Fase 4) avviene tramite 'ricevi_voto', che esegue gli stessi
-        controlli sul token nel contesto della ricezione del payload.
-        """
-        h_t_hex = token.hash_token.hex()
-        if h_t_hex in self._elenco_token_usati:
-            return False
-
-        firma_valida = cu.rsa_pss_verify(pk_as, token.hash_token, token.firma_as)
-        if not firma_valida:
-            return False
-
-        self._token_ricevuti[token.valore] = token
-        self._elenco_token_usati[h_t_hex] = True
-        return True
-
-    def token_gia_utilizzato(self, token: TokenVoto) -> bool:
-        """
-        Verifica se un dato token e' gia' stato impiegato per votare,
-        controllando la presenza della sua impronta h_T = SHA256(T)
-        nell'ElencoTokenUsati (struttura a Hash Table, ricerca O(1)).
-        """
-        return token.hash_token.hex() in self._elenco_token_usati
-
-    # -- Fase 4: ricezione, registrazione e rilascio della ricevuta -----------------
-
-    def ricevi_voto(self, payload: PayloadVoto, pk_as: rsa.RSAPublicKey) -> Ricevuta:
-        """
-        Riceve dal Client il payload di voto Payload = {C, T, Sig_AS(T)}
-        ed esegue, nell'ordine, i controlli descritti in Fase 4:
-
-            1) verifica dell'autenticita' del token tramite
-               Verify(PK_AS, h_T, Sig_AS(T));
-            2) controllo di unicita' del token tramite l'ElencoTokenUsati
-               (hash table, ricerca O(1)), per impedire il riutilizzo;
-            3) registrazione del voto cifrato nella coda interna
-               persistente e append-only;
-            4) calcolo del ReceiptID = SHA256(T || C) e generazione
-               della ricevuta crittografica firmata dall'Urna con
-               RSA-PSS: Sig_UE(ReceiptID || Timestamp).
-
-        Solleva ValueError se il payload viene rifiutato (token non
-        autentico oppure gia' utilizzato), riportando il motivo.
-        Ritorna la Ricevuta in caso di accettazione del voto.
-        """
-        h_t = cu.sha256(bytes.fromhex(payload.token_hex))
-        h_t_hex = h_t.hex()
-
-        # --- Passo 1: verifica autenticita' del token --------------------------
-        firma_as_bytes = bytes.fromhex(payload.firma_as_hex)
-        firma_valida = cu.rsa_pss_verify(pk_as, h_t, firma_as_bytes)
-        if not firma_valida:
-            raise ValueError("Token non autentico: verifica Sig_AS(T) fallita.")
-
-        # --- Passo 2: controllo di unicita' (ElencoTokenUsati, O(1)) ------------
-        if h_t_hex in self._elenco_token_usati:
-            raise ValueError("Token gia' utilizzato: voto respinto (anti double-voting).")
-
-        # Token autentico e non ancora usato: lo marchiamo immediatamente
-        # come utilizzato, prima di proseguire con la registrazione.
-        self._elenco_token_usati[h_t_hex] = True
-
-        # --- Passo 3: registrazione nella coda interna persistente --------------
-        receipt_id_hex = calcola_receipt_id(payload.token_hex, payload.ciphertext_hex)
-        timestamp = time.time()
-
-        voto_registrato = {
-            "token_hex": payload.token_hex,
-            "ciphertext_hex": payload.ciphertext_hex,
-            "receipt_id_hex": receipt_id_hex,
-            "timestamp": timestamp,
-        }
-        self._coda_interna.append(voto_registrato)
-
-        # --- Passo 4: generazione della ricevuta crittografica firmata ----------
-        messaggio_da_firmare = receipt_id_hex.encode() + str(timestamp).encode()
-        firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
-
-        ricevuta = Ricevuta(
-            token_hex=payload.token_hex,
-            ciphertext_hex=payload.ciphertext_hex,
-            receipt_id_hex=receipt_id_hex,
-            timestamp=timestamp,
-            firma_ue=firma_ue,
-        )
-        self._ricevute_emesse[receipt_id_hex] = ricevuta
-        return ricevuta
-
-    def numero_voti_in_coda(self) -> int:
-        """Numero di voti attualmente registrati nella coda interna (non ancora pubblicati a batch)."""
-        return len(self._coda_interna)
-
-    # -- Fase 5: chiusura dell'urna e pubblicazione sul Bulletin Board --------------
-
-    def pubblica_batch_su_bb(self, bb: "BulletinBoard", batch_id: str = "batch-1") -> BatchPubblicato:
-        """
-        Pubblica sul Bulletin Board un unico batch contenente tutte le
-        tuple (ReceiptID, ciphertext) attualmente presenti nella coda
-        interna, insieme alla Merkle Root del batch e alla relativa
-        firma dell'Urna.
-
-        In questa implementazione di base la pubblicazione avviene in
-        un solo batch comprensivo di tutti i voti raccolti finora; nulla
-        impedisce, in un'estensione futura, di richiamare questo metodo
-        piu' volte durante la finestra elettorale per pubblicare batch
-        incrementali (come previsto concettualmente dal WP2).
-        """
-        tuple_voti = [
-            (voto["receipt_id_hex"], voto["ciphertext_hex"])
-            for voto in self._coda_interna
-        ]
-        foglie = [receipt_id for receipt_id, _ in tuple_voti]
-        radice_merkle_hex = calcola_radice_merkle(foglie)
-        timestamp = time.time()
-
-        messaggio_da_firmare = (
-            batch_id.encode() + radice_merkle_hex.encode() + str(timestamp).encode()
-        )
-        firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
-
-        batch = BatchPubblicato(
-            batch_id=batch_id,
-            tuple_voti=tuple_voti,
-            radice_merkle_hex=radice_merkle_hex,
-            timestamp=timestamp,
-            firma_ue=firma_ue,
-        )
-        bb.pubblica_batch(batch)
-        return batch
-
-    def chiudi_elezione(self, bb: "BulletinBoard", election_id: str) -> ChiusuraElezione:
-        """
-        Esegue la chiusura della sessione elettorale (Fase 5):
-
-            1) interrompe concettualmente l'accettazione di nuovi
-               pacchetti (a partire da questa chiamata, l'Urna non deve
-               piu' essere alimentata con nuovi voti: il controllo
-               applicativo di tale vincolo e' demandato al chiamante,
-               es. la CLI, che non deve invocare 'ricevi_voto' dopo la
-               chiusura);
-            2) calcola la Merkle Root finale a partire dall'intero
-               insieme delle foglie (ReceiptID) pubblicate sul Bulletin
-               Board fino a questo momento;
-            3) firma e pubblica la chiusura sul Bulletin Board:
-
-                BB <- BB U { election_id, R_finale, timestamp_chiusura, Sig_UE }
-
-               con
-                Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
-        """
-        foglie_finali = bb.tutti_i_receipt_id()
-        radice_finale_hex = calcola_radice_merkle(foglie_finali)
-        timestamp_chiusura = time.time()
-
-        corpo = (
-            election_id.encode()
-            + radice_finale_hex.encode()
-            + str(timestamp_chiusura).encode()
-        )
-        impronta = cu.sha256(corpo)
-        firma_ue = cu.rsa_pss_sign(self._sk_sig, impronta)
-
-        chiusura = ChiusuraElezione(
-            election_id=election_id,
-            radice_finale_hex=radice_finale_hex,
-            timestamp_chiusura=timestamp_chiusura,
-            firma_ue=firma_ue,
-        )
-        bb.pubblica_chiusura(chiusura)
-        return chiusura
-
-    def stato(self) -> str:
-        """Riassunto leggibile dello stato corrente dell'Urna."""
-        return (
-            f"Urna(id={self.id}, certificata={self.cert_sig is not None}, "
-            f"token_registrati={len(self._token_ricevuti)}, "
-            f"voti_in_coda={len(self._coda_interna)}, "
-            f"ricevute_emesse={len(self._ricevute_emesse)})"
-        )
-
-    # -- Fase 5: acquisizione dal Bulletin Board e verifica di integrita' ------------
+ # -- Fase 5: acquisizione dal Bulletin Board e verifica di integrita' ------------
 
     def acquisisci_da_bulletin_board(self, bb: "BulletinBoard") -> dict:
         """
@@ -689,9 +436,263 @@ class Urna:
         bb.pubblica_verbale(verbale)
         return verbale
 
+
+
     def __repr__(self) -> str:
         certificata = self.cert_enc is not None and self.cert_sig is not None
         return f"AutoritaElettorale(id={self.id}, certificata={certificata})"
+
+
+# ---------------------------------------------------------------------------
+# Urna Elettronica (UE)
+# ---------------------------------------------------------------------------
+
+class Urna:
+    """
+    Urna Elettronica (UE).
+
+    Riceve esclusivamente voti cifrati (non implementato in questa
+    versione di base) e, in conformita' al proprio ruolo architetturale
+    (che non prevede la decifratura di dati riservati), genera in Fase 1
+    soltanto una coppia di chiavi dedicata alla firma digitale (RSA-PSS),
+    utilizzata per firmare ricevute e Merkle Root.
+
+    Mantiene inoltre uno stato persistente dei token pseudonimi
+    presentati dagli elettori, per poter rifiutare eventuali duplicati
+    (anti-double-voting) nelle fasi successive.
+    """
+
+    BIT_SIZE_UE = 2048
+
+    def __init__(self):
+        self.id = "UE-URNA"
+
+        self._sk_sig: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_UE)
+        self.pk_sig: rsa.RSAPublicKey = self._sk_sig.public_key()
+
+        self.cert_sig: Optional[Certificato] = None
+
+        # ElencoTokenUsati = {h_T1, h_T2, ...}: impronte SHA-256 dei token
+        # gia' impiegati per votare. Implementato come dizionario per
+        # ottenere una ricerca media O(1), come descritto nel WP2.
+        self._elenco_token_usati: Dict[str, bool] = {}
+
+        # Stato dell'urna: token registrati/ricevuti ma non ancora "spesi".
+        # Utile per ispezionare lo stato della componente dalla CLI.
+        self._token_ricevuti: Dict[str, TokenVoto] = {}
+
+        # Coda interna persistente e append-only dei voti cifrati accettati,
+        # non ancora pubblicati a batch sul Bulletin Board (Fase 4).
+        self._coda_interna: list = []
+
+        # Ricevute emesse, indicizzate per ReceiptID (hex), per eventuali
+        # consultazioni successive (es. dalla CLI).
+        self._ricevute_emesse: Dict[str, "Ricevuta"] = {}
+
+    def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
+        """Ottiene il certificato X.509 per la propria chiave di firma."""
+        self.cert_sig = ca.emetti_certificato(
+            id_soggetto=self.id,
+            chiave_pubblica=self.pk_sig,
+            uso="Firma Digitale",
+        )
+
+    def registra_token(self, token: TokenVoto, pk_as: rsa.RSAPublicKey) -> bool:
+        """
+        Riceve un token pseudonimo di voto dal Client e ne verifica
+        l'autenticita' tramite la chiave pubblica dell'AS (PK_AS),
+        prima di registrarlo come "presentato" nello stato dell'Urna.
+
+        Verifica eseguita:
+            Verify(PK_AS, h_T, Sig_AS(T)) = true
+
+        Ritorna True se il token e' valido e non era gia' stato
+        utilizzato, False altrimenti.
+
+        Nota: questo metodo e' mantenuto per compatibilita' e per
+        scenari in cui si vuole registrare un token senza ancora
+        sottomettere un voto. La sottomissione effettiva del voto
+        (Fase 4) avviene tramite 'ricevi_voto', che esegue gli stessi
+        controlli sul token nel contesto della ricezione del payload.
+        """
+        h_t_hex = token.hash_token.hex()
+        if h_t_hex in self._elenco_token_usati:
+            return False
+
+        firma_valida = cu.rsa_pss_verify(pk_as, token.hash_token, token.firma_as)
+        if not firma_valida:
+            return False
+
+        self._token_ricevuti[token.valore] = token
+        self._elenco_token_usati[h_t_hex] = True
+        return True
+
+    def token_gia_utilizzato(self, token: TokenVoto) -> bool:
+        """
+        Verifica se un dato token e' gia' stato impiegato per votare,
+        controllando la presenza della sua impronta h_T = SHA256(T)
+        nell'ElencoTokenUsati (struttura a Hash Table, ricerca O(1)).
+        """
+        return token.hash_token.hex() in self._elenco_token_usati
+
+    # -- Fase 4: ricezione, registrazione e rilascio della ricevuta -----------------
+
+    def ricevi_voto(self, payload: PayloadVoto, pk_as: rsa.RSAPublicKey) -> Ricevuta:
+        """
+        Riceve dal Client il payload di voto Payload = {C, T, Sig_AS(T)}
+        ed esegue, nell'ordine, i controlli descritti in Fase 4:
+
+            1) verifica dell'autenticita' del token tramite
+               Verify(PK_AS, h_T, Sig_AS(T));
+            2) controllo di unicita' del token tramite l'ElencoTokenUsati
+               (hash table, ricerca O(1)), per impedire il riutilizzo;
+            3) registrazione del voto cifrato nella coda interna
+               persistente e append-only;
+            4) calcolo del ReceiptID = SHA256(T || C) e generazione
+               della ricevuta crittografica firmata dall'Urna con
+               RSA-PSS: Sig_UE(ReceiptID || Timestamp).
+
+        Solleva ValueError se il payload viene rifiutato (token non
+        autentico oppure gia' utilizzato), riportando il motivo.
+        Ritorna la Ricevuta in caso di accettazione del voto.
+        """
+        h_t = cu.sha256(bytes.fromhex(payload.token_hex))
+        h_t_hex = h_t.hex()
+
+        # --- Passo 1: verifica autenticita' del token --------------------------
+        firma_as_bytes = bytes.fromhex(payload.firma_as_hex)
+        firma_valida = cu.rsa_pss_verify(pk_as, h_t, firma_as_bytes)
+        if not firma_valida:
+            raise ValueError("Token non autentico: verifica Sig_AS(T) fallita.")
+
+        # --- Passo 2: controllo di unicita' (ElencoTokenUsati, O(1)) ------------
+        if h_t_hex in self._elenco_token_usati:
+            raise ValueError("Token gia' utilizzato: voto respinto (anti double-voting).")
+
+        # Token autentico e non ancora usato: lo marchiamo immediatamente
+        # come utilizzato, prima di proseguire con la registrazione.
+        self._elenco_token_usati[h_t_hex] = True
+
+        # --- Passo 3: registrazione nella coda interna persistente --------------
+        receipt_id_hex = calcola_receipt_id(payload.token_hex, payload.ciphertext_hex)
+        timestamp = time.time()
+
+        voto_registrato = {
+            "token_hex": payload.token_hex,
+            "ciphertext_hex": payload.ciphertext_hex,
+            "receipt_id_hex": receipt_id_hex,
+            "timestamp": timestamp,
+        }
+        self._coda_interna.append(voto_registrato)
+
+        # --- Passo 4: generazione della ricevuta crittografica firmata ----------
+        messaggio_da_firmare = receipt_id_hex.encode() + str(timestamp).encode()
+        firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
+
+        ricevuta = Ricevuta(
+            token_hex=payload.token_hex,
+            ciphertext_hex=payload.ciphertext_hex,
+            receipt_id_hex=receipt_id_hex,
+            timestamp=timestamp,
+            firma_ue=firma_ue,
+        )
+        self._ricevute_emesse[receipt_id_hex] = ricevuta
+        return ricevuta
+
+    def numero_voti_in_coda(self) -> int:
+        """Numero di voti attualmente registrati nella coda interna (non ancora pubblicati a batch)."""
+        return len(self._coda_interna)
+
+    # -- Fase 5: chiusura dell'urna e pubblicazione sul Bulletin Board --------------
+
+    def pubblica_batch_su_bb(self, bb: "BulletinBoard", batch_id: str = "batch-1") -> BatchPubblicato:
+        """
+        Pubblica sul Bulletin Board un unico batch contenente tutte le
+        tuple (ReceiptID, ciphertext) attualmente presenti nella coda
+        interna, insieme alla Merkle Root del batch e alla relativa
+        firma dell'Urna.
+
+        In questa implementazione di base la pubblicazione avviene in
+        un solo batch comprensivo di tutti i voti raccolti finora; nulla
+        impedisce, in un'estensione futura, di richiamare questo metodo
+        piu' volte durante la finestra elettorale per pubblicare batch
+        incrementali (come previsto concettualmente dal WP2).
+        """
+        tuple_voti = [
+            (voto["receipt_id_hex"], voto["ciphertext_hex"])
+            for voto in self._coda_interna
+        ]
+        foglie = [receipt_id for receipt_id, _ in tuple_voti]
+        radice_merkle_hex = calcola_radice_merkle(foglie)
+        timestamp = time.time()
+
+        messaggio_da_firmare = (
+            batch_id.encode() + radice_merkle_hex.encode() + str(timestamp).encode()
+        )
+        firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
+
+        batch = BatchPubblicato(
+            batch_id=batch_id,
+            tuple_voti=tuple_voti,
+            radice_merkle_hex=radice_merkle_hex,
+            timestamp=timestamp,
+            firma_ue=firma_ue,
+        )
+        bb.pubblica_batch(batch)
+        return batch
+
+    def chiudi_elezione(self, bb: "BulletinBoard", election_id: str) -> ChiusuraElezione:
+        """
+        Esegue la chiusura della sessione elettorale (Fase 5):
+
+            1) interrompe concettualmente l'accettazione di nuovi
+               pacchetti (a partire da questa chiamata, l'Urna non deve
+               piu' essere alimentata con nuovi voti: il controllo
+               applicativo di tale vincolo e' demandato al chiamante,
+               es. la CLI, che non deve invocare 'ricevi_voto' dopo la
+               chiusura);
+            2) calcola la Merkle Root finale a partire dall'intero
+               insieme delle foglie (ReceiptID) pubblicate sul Bulletin
+               Board fino a questo momento;
+            3) firma e pubblica la chiusura sul Bulletin Board:
+
+                BB <- BB U { election_id, R_finale, timestamp_chiusura, Sig_UE }
+
+               con
+                Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
+        """
+        foglie_finali = bb.tutti_i_receipt_id()
+        radice_finale_hex = calcola_radice_merkle(foglie_finali)
+        timestamp_chiusura = time.time()
+
+        corpo = (
+            election_id.encode()
+            + radice_finale_hex.encode()
+            + str(timestamp_chiusura).encode()
+        )
+        impronta = cu.sha256(corpo)
+        firma_ue = cu.rsa_pss_sign(self._sk_sig, impronta)
+
+        chiusura = ChiusuraElezione(
+            election_id=election_id,
+            radice_finale_hex=radice_finale_hex,
+            timestamp_chiusura=timestamp_chiusura,
+            firma_ue=firma_ue,
+        )
+        bb.pubblica_chiusura(chiusura)
+        return chiusura
+
+    def stato(self) -> str:
+        """Riassunto leggibile dello stato corrente dell'Urna."""
+        return (
+            f"Urna(id={self.id}, certificata={self.cert_sig is not None}, "
+            f"token_registrati={len(self._token_ricevuti)}, "
+            f"voti_in_coda={len(self._coda_interna)}, "
+            f"ricevute_emesse={len(self._ricevute_emesse)})"
+        )
+
+    def __repr__(self) -> str:
+        return self.stato()
 
 
 # ---------------------------------------------------------------------------
