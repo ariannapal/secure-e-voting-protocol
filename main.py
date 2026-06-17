@@ -526,10 +526,6 @@ def _el_vota(stato: StatoSistema, client: Client) -> None:
     campo("  Lista selezionata:", lista_scelta)
     campo("  Preferenza interna:", candidato_scelto if candidato_scelto else "(nessuna)")
     print()
-    conferma = input("  Confermi il voto? (s/N): ").strip().lower()
-    if conferma != "s":
-        info("Voto annullato dall'elettore.")
-        return
 
     print()
     print("  Cifratura in corso...")
