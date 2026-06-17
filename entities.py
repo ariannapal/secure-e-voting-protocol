@@ -1,6 +1,4 @@
 """
-entities.py
------------
 Definisce le entita' principali del sistema di voto elettronico
 universitario descritto nel WP2:
 
@@ -22,9 +20,6 @@ In questa implementazione vengono coperte:
       (verifica del token, controllo di unicita' tramite
       ElencoTokenUsati, calcolo del ReceiptID, rilascio della ricevuta
       firmata dall'Urna e verifica locale lato client)
-
-Le fasi successive (Merkle Tree/Bulletin Board e scrutinio) sono
-lasciate come estensioni future.
 """
 
 from __future__ import annotations
@@ -38,7 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 import crypto_utils as cu
-from pki import CertificationAuthority, Certificato, verifica_certificato_offline
+from pki import CertificationAuthority, Certificato, verifica_certificato_offline, genera_chiave_e_csr, carica_chiave_privata, USO_CIFRATURA, USO_FIRMA_DIGITALE
 from ballot import MessaggioVoto, PayloadVoto, Ricevuta, calcola_receipt_id
 from election_config import ConfigurazioneElettorale
 from bulletin_board import (
@@ -99,9 +94,7 @@ class AutoritaElettorale:
         - coppia di Cifratura/Decifratura  (PK_AE_enc, SK_AE_enc)
         - coppia di Firma/Verifica          (PK_AE_sig, SK_AE_sig)
 
-    La chiave privata di decifratura (SK_AE_enc) viene mantenuta offline
-    e sara' utilizzata soltanto in Fase 5 (scrutinio, non implementata
-    in questa versione di base).
+    La chiave privata di decifratura (SK_AE_enc) sara' utilizzata soltanto in Fase 5 
     """
 
     BIT_SIZE_AE = 4096
@@ -110,12 +103,14 @@ class AutoritaElettorale:
         self.id = "AE-UNIVERSITA"
 
         # Coppia di cifratura/decifratura: PK_AE^enc, SK_AE^enc
-        self._sk_enc: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_AE)
-        self.pk_enc: rsa.RSAPublicKey = self._sk_enc.public_key()
+        self._sk_enc: Optional[rsa.RSAPrivateKey] = None
+        self.pk_enc: Optional[rsa.RSAPublicKey] = None
 
-        # Coppia di firma/verifica: PK_AE^sig, SK_AE^sig
-        self._sk_sig: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_AE)
-        self.pk_sig: rsa.RSAPublicKey = self._sk_sig.public_key()
+        self._sk_sig: Optional[rsa.RSAPrivateKey] = None
+        self.pk_sig: Optional[rsa.RSAPublicKey] = None
+
+        self._dir_lavoro = "pki_runtime/AE"
+
 
         # Certificati X.509, popolati dopo la certificazione (Fase 1)
         self.cert_enc: Optional[Certificato] = None
@@ -123,32 +118,54 @@ class AutoritaElettorale:
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """
-        Predispone le due CSR (per la chiave di cifratura e per quella
-        di firma) e le sottopone alla Certification Authority, ottenendo
-        i due certificati X.509 distinti:
+        Genera (tramite OpenSSL) le due coppie di chiavi RSA a 4096 bit
+        dell'AE (cifratura e firma), produce le due CSR corrispondenti e
+        le sottopone alla Certification Authority d'Ateneo, ottenendo i
+        due certificati X.509 distinti:
 
             Cert_AE^enc = {ID_AE, PK_AE^enc, Uso: Cifratura, ...}
             Cert_AE^sig = {ID_AE, PK_AE^sig, Uso: Firma Digitale, ...}
+
+        Le chiavi private vengono generate su disco da OpenSSL e poi
+        ricaricate in memoria con 'cryptography', per essere utilizzate
+        nelle operazioni applicative (RSA-OAEP per la decifratura in Fase
+        5, RSA-PSS per la firma del verbale finale).
         """
+        # --- Coppia di cifratura/decifratura ---------------------------------
+        percorso_chiave_enc, percorso_csr_enc = genera_chiave_e_csr(
+            directory_lavoro=self._dir_lavoro,
+            nome_file_base="ae_enc",
+            common_name=f"{self.id}-ENC",
+            bit_size=self.BIT_SIZE_AE,
+        )
         self.cert_enc = ca.emetti_certificato(
             id_soggetto=self.id,
-            chiave_pubblica=self.pk_enc,
-            uso="Cifratura",
+            percorso_csr=percorso_csr_enc,
+            uso=USO_CIFRATURA,
+        )
+        self._sk_enc = carica_chiave_privata(percorso_chiave_enc)
+        self.pk_enc = self._sk_enc.public_key()
+
+        # --- Coppia di firma/verifica -----------------------------------------
+        percorso_chiave_sig, percorso_csr_sig = genera_chiave_e_csr(
+            directory_lavoro=self._dir_lavoro,
+            nome_file_base="ae_sig",
+            common_name=f"{self.id}-SIG",
+            bit_size=self.BIT_SIZE_AE,
         )
         self.cert_sig = ca.emetti_certificato(
             id_soggetto=self.id,
-            chiave_pubblica=self.pk_sig,
-            uso="Firma Digitale",
+            percorso_csr=percorso_csr_sig,
+            uso=USO_FIRMA_DIGITALE,
         )
+        self._sk_sig = carica_chiave_privata(percorso_chiave_sig)
+        self.pk_sig = self._sk_sig.public_key()
 
  # -- Fase 5: acquisizione dal Bulletin Board e verifica di integrita' ------------
 
     def acquisisci_da_bulletin_board(self, bb: "BulletinBoard") -> dict:
         """
-        Scarica dal Bulletin Board pubblico (canale esclusivo di
-        acquisizione, come previsto dal WP2: l'AE non riceve nulla in
-        via privata dall'Urna) i dati necessari allo scrutinio:
-
+        Scarica dal Bulletin Board pubblico i dati necessari allo scrutinio:
             - l'elenco delle tuple (ReceiptID, ciphertext) pubblicate;
             - la pubblicazione di chiusura (R_finale, timestamp, Sig_UE);
             - l'attestazione dell'AS sul numero di token emessi.
@@ -186,12 +203,13 @@ class AutoritaElettorale:
         pk_as_sig: rsa.RSAPublicKey,
     ) -> None:
         """
-        Esegue, nell'ordine descritto nel WP2 (Fase 5), le verifiche di
-        integrita' e coerenza sui dati scaricati dal Bulletin Board:
-
+        Esegue le verifiche di integrita' e coerenza sui dati scaricati dal Bulletin Board:
             1) per ogni tupla (T_i, C_i) scaricata, ricalcola
                L'_i = SHA256(T_i || C_i) e verifica che corrisponda
-               esattamente al ReceiptID pubblicato; 
+               esattamente al ReceiptID pubblicato (in questa
+               implementazione il ReceiptID stesso e' gia' L_i, quindi
+               la verifica si riduce a un controllo di consistenza
+               della tupla scaricata: vedere nota sotto);
             2) verifica la firma dell'Urna su ciascun batch pubblicato
                (incluso il numero di schede fittizie di padding
                dichiarato per quel batch);
@@ -210,6 +228,26 @@ class AutoritaElettorale:
         verifica che dovesse fallire, cosi' che l'AE possa interrompere
         immediatamente lo scrutinio, come prescritto dal WP2.
 
+        Nota implementativa: nel formato dati di questo sistema il
+        ReceiptID e' definito come ReceiptID = SHA256(token_hex || C),
+        dove 'token_hex' e' la rappresentazione hex del token T (non T
+        in chiaro). Il ricalcolo del punto (1) e' quindi implicito nel
+        fatto che le tuple scaricate dal BB sono proprio le coppie
+        (ReceiptID, ciphertext) e non (T, ciphertext): l'AE non ha
+        comunque alcun motivo di mettere in dubbio la corrispondenza,
+        dato che il controllo che conta davvero a questo livello e' la
+        rigenerazione della Merkle Root sull'intero insieme dei
+        ReceiptID pubblicati, eseguita al punto (3).
+
+        Nota sul padding: le schede fittizie inserite dall'Urna per
+        preservare l'anonymity set minimo (WP2, Fase 4) sono incluse
+        nelle foglie del Merkle Tree esattamente come i voti reali (la
+        loro presenza e' quindi coperta dalla verifica di integrita'
+        strutturale), ma il loro NUMERO totale, dichiarato batch per
+        batch e coperto dalla firma Sig_UE di ciascun batch, viene
+        sottratto dal conteggio prima del confronto con n_token: in
+        caso contrario il padding farebbe fallire sistematicamente il
+        controllo di coerenza quantitativa.
         """
         tuple_voti: List[Tuple[str, str]] = dati_bb["tuple_voti"]
         batch_pubblicati: List["BatchPubblicato"] = dati_bb["batch_pubblicati"]
@@ -587,8 +625,9 @@ class Urna:
     def __init__(self):
         self.id = "UE-URNA"
 
-        self._sk_sig: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_UE)
-        self.pk_sig: rsa.RSAPublicKey = self._sk_sig.public_key()
+        self._sk_sig: Optional[rsa.RSAPrivateKey] = None
+        self.pk_sig: Optional[rsa.RSAPublicKey] = None
+        self._dir_lavoro = "pki_runtime/Urna"
 
         self.cert_sig: Optional[Certificato] = None
 
@@ -624,12 +663,24 @@ class Urna:
         self._sessione_chiusa: bool = False
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
-        """Ottiene il certificato X.509 per la propria chiave di firma."""
+        """
+        Genera (tramite OpenSSL) la coppia di chiavi RSA a 2048 bit
+        dedicata alla firma digitale, produce la CSR e la sottopone alla
+        CA d'Ateneo, ottenendo il certificato X.509 per la chiave di firma.
+        """
+        percorso_chiave, percorso_csr = genera_chiave_e_csr(
+            directory_lavoro=self._dir_lavoro,
+            nome_file_base="ue_sig",
+            common_name=f"{self.id}-SIG",
+            bit_size=self.BIT_SIZE_UE,
+        )
         self.cert_sig = ca.emetti_certificato(
             id_soggetto=self.id,
-            chiave_pubblica=self.pk_sig,
-            uso="Firma Digitale",
+            percorso_csr=percorso_csr,
+            uso=USO_FIRMA_DIGITALE,
         )
+        self._sk_sig = carica_chiave_privata(percorso_chiave)
+        self.pk_sig = self._sk_sig.public_key()
 
     def registra_token(self, token: TokenVoto, pk_as: rsa.RSAPublicKey) -> bool:
         """
@@ -643,6 +694,11 @@ class Urna:
         Ritorna True se il token e' valido e non era gia' stato
         utilizzato, False altrimenti.
 
+        Nota: questo metodo e' mantenuto per compatibilita' e per
+        scenari in cui si vuole registrare un token senza ancora
+        sottomettere un voto. La sottomissione effettiva del voto
+        (Fase 4) avviene tramite 'ricevi_voto', che esegue gli stessi
+        controlli sul token nel contesto della ricezione del payload.
         """
         h_t_hex = token.hash_token.hex()
         if h_t_hex in self._elenco_token_usati:
@@ -1036,21 +1092,33 @@ class AuthServer:
     def __init__(self):
         self.id = "AS-AUTENTICAZIONE"
 
-        self._sk_sig: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_AS)
-        self.pk_sig: rsa.RSAPublicKey = self._sk_sig.public_key()
-
+        self._sk_sig: Optional[rsa.RSAPrivateKey] = None
+        self.pk_sig: Optional[rsa.RSAPublicKey] = None
+        self._dir_lavoro = "pki_runtime/AS"
         self.cert_sig: Optional[Certificato] = None
-
+        
         # Registro_Elettori = { student_ID -> RegistroElettoreEntry }
         self._registro_elettori: Dict[str, RegistroElettoreEntry] = {}
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
-        """Ottiene il certificato X.509 per la propria chiave di firma."""
+        """
+        Genera (tramite OpenSSL) la coppia di chiavi RSA a 2048 bit
+        dedicata alla firma digitale dell'AS, produce la CSR e la
+        sottopone alla CA d'Ateneo.
+        """
+        percorso_chiave, percorso_csr = genera_chiave_e_csr(
+            directory_lavoro=self._dir_lavoro,
+            nome_file_base="as_sig",
+            common_name=f"{self.id}-SIG",
+            bit_size=self.BIT_SIZE_AS,
+        )
         self.cert_sig = ca.emetti_certificato(
             id_soggetto=self.id,
-            chiave_pubblica=self.pk_sig,
-            uso="Firma Digitale",
+            percorso_csr=percorso_csr,
+            uso=USO_FIRMA_DIGITALE,
         )
+        self._sk_sig = carica_chiave_privata(percorso_chiave)
+        self.pk_sig = self._sk_sig.public_key()
 
 
     # -- Gestione del registro degli aventi diritto --------------------------------
@@ -1374,8 +1442,7 @@ class Client:
         bb: Optional["BulletinBoard"] = None,
     ) -> Ricevuta:
         """
-        Implementa per intero la Fase 3 e la consegna del voto descritta
-        nel WP2:
+        Implementa per intero la Fase 3 e la consegna del voto 
 
             1) Validazione semantica della combinazione (lista, candidato):
                il candidato, se presente, deve appartenere alla lista

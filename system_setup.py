@@ -67,7 +67,7 @@ def inizializza_sistema(
 
     Ritorna un oggetto SistemaVoto con tutte le componenti pronte.
     """
-    ca = CertificationAuthority()
+    ca = CertificationAuthority(directory_ca="ca")
 
     ae = AutoritaElettorale()
     urna = Urna()
