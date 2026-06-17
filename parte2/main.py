@@ -23,7 +23,7 @@ Esegui con:
 
 import sys
 
-from system_setup import inizializza_sistema, bootstrap_client, SistemaVoto
+from system_setup import inizializza_sistema, bootstrap_client, esegui_fase5, SistemaVoto
 from entities import Client
 
 
@@ -53,6 +53,7 @@ def stampa_menu() -> None:
     print("6. Mostra stato del sistema")
     print("7. Verifica localmente il proprio token (lato Client)")
     print("8. Verifica localmente la propria ricevuta di voto (lato Client)")
+    print("9. Chiudi elezione ed esegui lo scrutinio (Fase 5)")
     print("0. Esci")
 
 
@@ -304,6 +305,43 @@ def azione_verifica_ricevuta(ctx: ContestoCLI) -> None:
         f"{'VALIDA' if esito else 'NON VALIDA'}"
     )
 
+def azione_esegui_scrutinio(ctx: ContestoCLI) -> None:
+    if ctx.sistema is None:
+        print("\n[Errore] Devi prima inizializzare il sistema (opzione 1).")
+        return
+
+    if ctx.sistema.elezione_chiusa:
+        print("\n[Errore] L'elezione e' gia' stata chiusa e scrutinata.")
+        return
+
+    stampa_intestazione("FASE 5 - Scrutinio e decifrazione dei voti")
+    print("Chiusura dell'Urna e pubblicazione della Merkle Root finale...")
+    print("Pubblicazione dell'attestazione dell'AS sul numero di token emessi...")
+    print("Acquisizione dei dati dal Bulletin Board da parte dell'AE...")
+    print("Verifica di integrita' (Merkle Root, firme) e coerenza quantitativa...")
+    print("Decifratura RSA-OAEP e validazione delle schede...")
+    print("Conteggio delle preferenze e redazione del verbale finale...\n")
+
+    try:
+        verbale = esegui_fase5(ctx.sistema)
+    except ValueError as e:
+        print(f"[Scrutinio interrotto] {e}")
+        return
+
+    stampa_intestazione("Verbale finale dello scrutinio (pubblicato sul Bulletin Board)")
+    print(f"  Election ID:                {verbale.election_id}")
+    print(f"  Merkle Root finale:         {verbale.radice_finale_hex}")
+    print(f"  ReceiptID pubblicati:       {verbale.numero_receipt_pubblicati}")
+    print(f"  Voti cifrati scrutinati:    {verbale.voti_cifrati_scrutinati}")
+    print(f"  Voti decifrati:             {verbale.voti_decifrati}")
+    print(f"  Voti validi:                {verbale.voti_validi}")
+    print(f"  Voti non validi:            {verbale.voti_non_validi}")
+    print(f"  Risultati per lista:        {verbale.risultati_per_lista}")
+    print(f"  Preferenze per candidato:   {verbale.preferenze_per_candidato}")
+    print(f"  Timestamp scrutinio:        {verbale.timestamp_scrutinio}")
+    print(f"  Sig_AE(Verbale):            {verbale.firma_ae.hex()[:64]}... "
+          f"({len(verbale.firma_ae)} byte)")
+
 
 def main() -> None:
     ctx = ContestoCLI()
@@ -331,6 +369,8 @@ def main() -> None:
             azione_verifica_token_locale(ctx)
         elif scelta == "8":
             azione_verifica_ricevuta(ctx)
+        elif scelta == "9":
+            azione_esegui_scrutinio(ctx)
         elif scelta == "0":
             print("Uscita dal sistema. Arrivederci.")
             sys.exit(0)

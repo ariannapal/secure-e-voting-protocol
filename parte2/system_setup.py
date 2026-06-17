@@ -18,11 +18,12 @@ avvia l'applicazione di voto istanzia il proprio Client e ne esegue
 il bootstrap della fiducia (vedi 'bootstrap_client').
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pki import CertificationAuthority
 from entities import AutoritaElettorale, Urna, AuthServer, Client
 from election_config import ConfigurazioneElettorale, configurazione_demo
+from bulletin_board import BulletinBoard, VerbaleFinale
 
 
 @dataclass
@@ -33,6 +34,10 @@ class SistemaVoto:
     urna: Urna
     auth_server: AuthServer
     configurazione: ConfigurazioneElettorale
+    bb: BulletinBoard = field(default_factory=BulletinBoard)
+    election_id: str = "ELEZIONI-2026-RAPPRESENTANTI-STUDENTI"
+    elezione_chiusa: bool = False
+    verbale: VerbaleFinale | None = None
 
 
 def inizializza_sistema() -> SistemaVoto:
@@ -56,6 +61,7 @@ def inizializza_sistema() -> SistemaVoto:
     urna = Urna()
     auth_server = AuthServer()
     configurazione = configurazione_demo()
+    bb = BulletinBoard()
 
     # Certificazione delle chiavi pubbliche presso la CA d'Ateneo.
     ae.richiedi_certificazione(ca)
@@ -63,7 +69,12 @@ def inizializza_sistema() -> SistemaVoto:
     auth_server.richiedi_certificazione(ca)
 
     return SistemaVoto(
-        ca=ca, ae=ae, urna=urna, auth_server=auth_server, configurazione=configurazione
+        ca=ca,
+        ae=ae,
+        urna=urna,
+        auth_server=auth_server,
+        configurazione=configurazione,
+        bb=bb,
     )
 
 
@@ -94,3 +105,51 @@ def bootstrap_client(sistema: SistemaVoto, student_id: str) -> Client:
         )
 
     return client
+
+
+
+
+def esegui_fase5(sistema: SistemaVoto) -> VerbaleFinale:
+    """
+    Orchestra la Fase 5 (Scrutinio e decifrazione dei voti) per
+    l'intero sistema, secondo la sequenza descritta nel WP2:
+
+        1) l'Urna pubblica sul Bulletin Board l'unico batch contenente
+           tutti i voti raccolti durante la finestra elettorale;
+        2) l'Urna chiude la sessione elettorale, calcolando e
+           pubblicando la Merkle Root finale firmata;
+        3) l'AS pubblica sul Bulletin Board l'attestazione firmata sul
+           numero totale di token emessi durante la sessione;
+        4) l'Autorita' Elettorale scarica i dati dal Bulletin Board,
+           ne verifica l'integrita' e la coerenza quantitativa,
+           decifra e valida i voti, conta le preferenze e pubblica il
+           verbale finale firmato.
+
+    Imposta 'sistema.elezione_chiusa = True' e 'sistema.verbale' con
+    il risultato, per essere consultati successivamente (es. dalla
+    CLI). Ritorna il VerbaleFinale pubblicato.
+
+    Solleva ValueError se l'AE rileva un problema di integrita' o di
+    coerenza quantitativa durante la verifica (lo scrutinio viene
+    interrotto e nessun verbale viene pubblicato).
+    """
+    # --- Passo 1-2: pubblicazione del batch e chiusura da parte dell'Urna ----------
+    sistema.urna.pubblica_batch_su_bb(sistema.bb, batch_id="batch-1")
+    sistema.urna.chiudi_elezione(sistema.bb, election_id=sistema.election_id)
+
+    # --- Passo 3: attestazione dell'AS sul numero di token emessi ------------------
+    attestazione = sistema.auth_server.emetti_attestazione_token()
+    sistema.bb.pubblica_attestazione_token(attestazione)
+
+    # --- Passo 4: scrutinio da parte dell'Autorita' Elettorale ----------------------
+    verbale = sistema.ae.esegui_scrutinio(
+        bb=sistema.bb,
+        configurazione=sistema.configurazione,
+        pk_ue_sig=sistema.urna.pk_sig,
+        pk_as_sig=sistema.auth_server.pk_sig,
+        election_id=sistema.election_id,
+    )
+
+    sistema.elezione_chiusa = True
+    sistema.verbale = verbale
+    return verbale

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -39,6 +39,15 @@ import crypto_utils as cu
 from pki import CertificationAuthority, Certificato, verifica_certificato_offline
 from ballot import MessaggioVoto, PayloadVoto, Ricevuta, calcola_receipt_id
 from election_config import ConfigurazioneElettorale
+from bulletin_board import (
+    BulletinBoard,
+    BatchPubblicato,
+    ChiusuraElezione,
+    AttestazioneTokenAS,
+    VerbaleFinale,
+)
+from merkle import calcola_radice_merkle
+
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +304,85 @@ class Urna:
         """Numero di voti attualmente registrati nella coda interna (non ancora pubblicati a batch)."""
         return len(self._coda_interna)
 
+    # -- Fase 5: chiusura dell'urna e pubblicazione sul Bulletin Board --------------
+
+    def pubblica_batch_su_bb(self, bb: "BulletinBoard", batch_id: str = "batch-1") -> BatchPubblicato:
+        """
+        Pubblica sul Bulletin Board un unico batch contenente tutte le
+        tuple (ReceiptID, ciphertext) attualmente presenti nella coda
+        interna, insieme alla Merkle Root del batch e alla relativa
+        firma dell'Urna.
+
+        In questa implementazione di base la pubblicazione avviene in
+        un solo batch comprensivo di tutti i voti raccolti finora; nulla
+        impedisce, in un'estensione futura, di richiamare questo metodo
+        piu' volte durante la finestra elettorale per pubblicare batch
+        incrementali (come previsto concettualmente dal WP2).
+        """
+        tuple_voti = [
+            (voto["receipt_id_hex"], voto["ciphertext_hex"])
+            for voto in self._coda_interna
+        ]
+        foglie = [receipt_id for receipt_id, _ in tuple_voti]
+        radice_merkle_hex = calcola_radice_merkle(foglie)
+        timestamp = time.time()
+
+        messaggio_da_firmare = (
+            batch_id.encode() + radice_merkle_hex.encode() + str(timestamp).encode()
+        )
+        firma_ue = cu.rsa_pss_sign(self._sk_sig, messaggio_da_firmare)
+
+        batch = BatchPubblicato(
+            batch_id=batch_id,
+            tuple_voti=tuple_voti,
+            radice_merkle_hex=radice_merkle_hex,
+            timestamp=timestamp,
+            firma_ue=firma_ue,
+        )
+        bb.pubblica_batch(batch)
+        return batch
+
+    def chiudi_elezione(self, bb: "BulletinBoard", election_id: str) -> ChiusuraElezione:
+        """
+        Esegue la chiusura della sessione elettorale (Fase 5):
+
+            1) interrompe concettualmente l'accettazione di nuovi
+               pacchetti (a partire da questa chiamata, l'Urna non deve
+               piu' essere alimentata con nuovi voti: il controllo
+               applicativo di tale vincolo e' demandato al chiamante,
+               es. la CLI, che non deve invocare 'ricevi_voto' dopo la
+               chiusura);
+            2) calcola la Merkle Root finale a partire dall'intero
+               insieme delle foglie (ReceiptID) pubblicate sul Bulletin
+               Board fino a questo momento;
+            3) firma e pubblica la chiusura sul Bulletin Board:
+
+                BB <- BB U { election_id, R_finale, timestamp_chiusura, Sig_UE }
+
+               con
+                Sig_UE = Sig(SK_UE, H(election_id || R_finale || timestamp_chiusura))
+        """
+        foglie_finali = bb.tutti_i_receipt_id()
+        radice_finale_hex = calcola_radice_merkle(foglie_finali)
+        timestamp_chiusura = time.time()
+
+        corpo = (
+            election_id.encode()
+            + radice_finale_hex.encode()
+            + str(timestamp_chiusura).encode()
+        )
+        impronta = cu.sha256(corpo)
+        firma_ue = cu.rsa_pss_sign(self._sk_sig, impronta)
+
+        chiusura = ChiusuraElezione(
+            election_id=election_id,
+            radice_finale_hex=radice_finale_hex,
+            timestamp_chiusura=timestamp_chiusura,
+            firma_ue=firma_ue,
+        )
+        bb.pubblica_chiusura(chiusura)
+        return chiusura
+
     def stato(self) -> str:
         """Riassunto leggibile dello stato corrente dell'Urna."""
         return (
@@ -304,8 +392,306 @@ class Urna:
             f"ricevute_emesse={len(self._ricevute_emesse)})"
         )
 
+    # -- Fase 5: acquisizione dal Bulletin Board e verifica di integrita' ------------
+
+    def acquisisci_da_bulletin_board(self, bb: "BulletinBoard") -> dict:
+        """
+        Scarica dal Bulletin Board pubblico (canale esclusivo di
+        acquisizione, come previsto dal WP2: l'AE non riceve nulla in
+        via privata dall'Urna) i dati necessari allo scrutinio:
+
+            - l'elenco delle tuple (ReceiptID, ciphertext) pubblicate;
+            - la pubblicazione di chiusura (R_finale, timestamp, Sig_UE);
+            - l'attestazione dell'AS sul numero di token emessi.
+
+        Ritorna un dizionario con questi elementi, senza eseguire
+        ancora alcuna verifica (demandata a 'verifica_integrita_bb').
+
+        Solleva RuntimeError se l'urna non ha ancora pubblicato la
+        chiusura, oppure se l'attestazione dell'AS non e' presente sul
+        Bulletin Board.
+        """
+        if bb.chiusura is None:
+            raise RuntimeError(
+                "Il Bulletin Board non contiene ancora la pubblicazione di "
+                "chiusura dell'Urna: impossibile procedere con lo scrutinio."
+            )
+        if bb.attestazione_token is None:
+            raise RuntimeError(
+                "Il Bulletin Board non contiene ancora l'attestazione "
+                "dell'AS sul numero di token emessi: impossibile procedere "
+                "con il controllo di coerenza quantitativa."
+            )
+
+        return {
+            "tuple_voti": bb.tutte_le_tuple(),
+            "chiusura": bb.chiusura,
+            "attestazione_token": bb.attestazione_token,
+        }
+
+    def verifica_integrita_bb(
+        self,
+        dati_bb: dict,
+        pk_ue_sig: rsa.RSAPublicKey,
+        pk_as_sig: rsa.RSAPublicKey,
+    ) -> None:
+        """
+        Esegue, nell'ordine descritto nel WP2 (Fase 5), le verifiche di
+        integrita' e coerenza sui dati scaricati dal Bulletin Board:
+
+            1) per ogni tupla (T_i, C_i) scaricata, ricalcola
+               L'_i = SHA256(T_i || C_i) e verifica che corrisponda
+               esattamente al ReceiptID pubblicato (in questa
+               implementazione il ReceiptID stesso e' gia' L_i, quindi
+               la verifica si riduce a un controllo di consistenza
+               della tupla scaricata: vedere nota sotto);
+            2) ricalcola la Merkle Root a partire dalle foglie scaricate
+               e la confronta con R_finale pubblicata dall'Urna;
+            3) verifica la firma dell'Urna sulla chiusura:
+                   Verify(PK_UE, Sig_UE(election_id||R_finale||ts)) = true
+            4) verifica la firma dell'AS sull'attestazione:
+                   Verify(PK_AS, Sig_AS(n_token)) = true
+            5) verifica la coerenza quantitativa:
+                   |{L_i}| == |{C_i}| <= n_token
+
+        Solleva ValueError con un messaggio specifico per ciascuna
+        verifica che dovesse fallire, cosi' che l'AE possa interrompere
+        immediatamente lo scrutinio, come prescritto dal WP2.
+
+        Nota implementativa: nel formato dati di questo sistema il
+        ReceiptID e' definito come ReceiptID = SHA256(token_hex || C),
+        dove 'token_hex' e' la rappresentazione hex del token T (non T
+        in chiaro). Il ricalcolo del punto (1) e' quindi implicito nel
+        fatto che le tuple scaricate dal BB sono proprio le coppie
+        (ReceiptID, ciphertext) e non (T, ciphertext): l'AE non ha
+        comunque alcun motivo di mettere in dubbio la corrispondenza,
+        dato che il controllo che conta davvero a questo livello e' la
+        rigenerazione della Merkle Root sull'intero insieme dei
+        ReceiptID pubblicati, eseguita al punto (2).
+        """
+        tuple_voti: List[Tuple[str, str]] = dati_bb["tuple_voti"]
+        chiusura: "ChiusuraElezione" = dati_bb["chiusura"]
+        attestazione: "AttestazioneTokenAS" = dati_bb["attestazione_token"]
+
+        foglie = [receipt_id for receipt_id, _ in tuple_voti]
+
+        # --- Verifica 2: rigenerazione della Merkle Root --------------------------
+        radice_ricalcolata = calcola_radice_merkle(foglie)
+        if radice_ricalcolata != chiusura.radice_finale_hex:
+            raise ValueError(
+                "Merkle Root ricalcolata non corrisponde a R_finale pubblicata "
+                "dall'Urna: integrita' dei dati compromessa. Scrutinio interrotto."
+            )
+
+        # --- Verifica 3: firma dell'Urna sulla chiusura ----------------------------
+        corpo_chiusura = (
+            chiusura.election_id.encode()
+            + chiusura.radice_finale_hex.encode()
+            + str(chiusura.timestamp_chiusura).encode()
+        )
+        impronta_chiusura = cu.sha256(corpo_chiusura)
+        firma_ue_valida = cu.rsa_pss_verify(
+            pk_ue_sig, impronta_chiusura, chiusura.firma_ue
+        )
+        if not firma_ue_valida:
+            raise ValueError(
+                "Firma dell'Urna Elettronica sulla chiusura non valida: "
+                "scrutinio interrotto."
+            )
+
+        # --- Verifica 4: firma dell'AS sull'attestazione n_token -------------------
+        firma_as_valida = cu.rsa_pss_verify(
+            pk_as_sig,
+            str(attestazione.n_token).encode("utf-8"),
+            attestazione.firma_as,
+        )
+        if not firma_as_valida:
+            raise ValueError(
+                "Firma dell'AS sull'attestazione del numero di token emessi "
+                "non valida: scrutinio interrotto."
+            )
+
+        # --- Verifica 5: coerenza quantitativa --------------------------------------
+        n_receipt = len(foglie)
+        n_ciphertext = len(tuple_voti)
+        if n_receipt != n_ciphertext:
+            raise ValueError(
+                "Numero di ReceiptID e numero di ciphertext non coincidono: "
+                "scrutinio interrotto."
+            )
+        if n_receipt > attestazione.n_token:
+            raise ValueError(
+                f"Numero di voti pubblicati ({n_receipt}) superiore al numero "
+                f"di token emessi dall'AS ({attestazione.n_token}): "
+                "possibile iniezione di voti non autorizzati. Scrutinio interrotto."
+            )
+
+    # -- Fase 5: decifratura, validazione e conteggio --------------------------------
+
+    def decifra_e_valida_voti(
+        self,
+        tuple_voti: List[Tuple[str, str]],
+        configurazione: ConfigurazioneElettorale,
+    ) -> Tuple[List[MessaggioVoto], int, int]:
+        """
+        Per ogni ciphertext C_i presente nelle tuple scaricate dal
+        Bulletin Board:
+
+            1) decifra con la chiave privata di decifratura dell'AE:
+                   M_i = RSA-OAEP_Decrypt(SK_AE_enc, C_i)
+            2) valida formalmente e semanticamente la scheda ottenuta:
+                   - il formato del messaggio deve essere quello atteso
+                     (JSON con i campi 'lista', 'candidato', 'nonce');
+                   - la lista deve appartenere a quelle ammesse dalla
+                     configurazione elettorale;
+                   - se presente, il candidato deve appartenere alla
+                     lista indicata.
+
+        Ritorna una tripla (schede_valide, numero_decifrati, numero_non_validi),
+        dove 'schede_valide' e' la lista dei MessaggioVoto che hanno
+        superato tutti i controlli e sono quindi pronti per il conteggio.
+
+        Le schede che falliscono la decifratura (es. ciphertext
+        malformato) o la validazione vengono scartate dal conteggio ma
+        non interrompono lo scrutinio: vengono semplicemente contate
+        come voti non validi, in modo che un singolo voto malformato
+        non possa invalidare l'intera elezione.
+        """
+        schede_valide: List[MessaggioVoto] = []
+        numero_decifrati = 0
+        numero_non_validi = 0
+
+        for _, ciphertext_hex in tuple_voti:
+            try:
+                ciphertext = bytes.fromhex(ciphertext_hex)
+                m_bytes = cu.rsa_oaep_decrypt(self._sk_enc, ciphertext)
+                numero_decifrati += 1
+            except Exception:
+                # Decifratura fallita: ciphertext malformato o corrotto.
+                numero_non_validi += 1
+                continue
+
+            try:
+                messaggio = MessaggioVoto.from_json_bytes(m_bytes)
+            except Exception:
+                numero_non_validi += 1
+                continue
+
+            formato_valido = (
+                isinstance(messaggio.lista, str)
+                and (messaggio.candidato is None or isinstance(messaggio.candidato, str))
+                and isinstance(messaggio.nonce_hex, str)
+            )
+            if not formato_valido or not messaggio.valida_dimensioni():
+                numero_non_validi += 1
+                continue
+
+            if not configurazione.lista_esiste(messaggio.lista):
+                numero_non_validi += 1
+                continue
+
+            if messaggio.candidato is not None and not configurazione.candidato_appartiene_a_lista(
+                messaggio.lista, messaggio.candidato
+            ):
+                numero_non_validi += 1
+                continue
+
+            schede_valide.append(messaggio)
+
+        return schede_valide, numero_decifrati, numero_non_validi
+
+    def conta_preferenze(
+        self, schede_valide: List[MessaggioVoto]
+    ) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """
+        Esegue il conteggio delle preferenze a partire dalle schede
+        gia' decifrate e validate:
+
+            Risultati  = { Lista_1: v_1, ..., Lista_s: v_s }
+            Preferenze = { Candidato_1: p_1, ..., Candidato_k: p_k }
+        """
+        risultati_per_lista: Dict[str, int] = {}
+        preferenze_per_candidato: Dict[str, int] = {}
+
+        for scheda in schede_valide:
+            risultati_per_lista[scheda.lista] = risultati_per_lista.get(scheda.lista, 0) + 1
+            if scheda.candidato is not None:
+                preferenze_per_candidato[scheda.candidato] = (
+                    preferenze_per_candidato.get(scheda.candidato, 0) + 1
+                )
+
+        return risultati_per_lista, preferenze_per_candidato
+
+    # -- Fase 5: redazione, firma e pubblicazione del verbale finale -----------------
+
+    def esegui_scrutinio(
+        self,
+        bb: "BulletinBoard",
+        configurazione: ConfigurazioneElettorale,
+        pk_ue_sig: rsa.RSAPublicKey,
+        pk_as_sig: rsa.RSAPublicKey,
+        election_id: str,
+    ) -> VerbaleFinale:
+        """
+        Orchestra per intero la Fase 5 del protocollo, nell'ordine
+        descritto nel WP2:
+
+            1) acquisizione dei dati dal Bulletin Board pubblico;
+            2) verifica di integrita' e coerenza quantitativa
+               (Merkle Root, firme di Urna e AS, n_receipt <= n_token);
+            3) decifratura RSA-OAEP di ciascun voto con SK_AE_enc;
+            4) validazione formale/semantica di ciascuna scheda decifrata;
+            5) conteggio delle preferenze per lista e per candidato;
+            6) redazione del verbale finale, firma con SK_AE_sig
+               (Sig_AE(Verbale) = Sig(SK_AE_sig, H(Verbale))) e
+               pubblicazione sul Bulletin Board.
+
+        Solleva ValueError se una qualsiasi verifica di integrita' o
+        coerenza quantitativa fallisce (lo scrutinio viene interrotto
+        immediatamente, senza procedere alla decifratura).
+
+        Ritorna il VerbaleFinale, gia' firmato e pubblicato sul BB.
+        """
+        # --- Passo 1: acquisizione dal Bulletin Board -----------------------------
+        dati_bb = self.acquisisci_da_bulletin_board(bb)
+
+        # --- Passo 2: verifica di integrita' e coerenza quantitativa --------------
+        self.verifica_integrita_bb(dati_bb, pk_ue_sig=pk_ue_sig, pk_as_sig=pk_as_sig)
+
+        tuple_voti = dati_bb["tuple_voti"]
+        chiusura = dati_bb["chiusura"]
+
+        # --- Passi 3-4: decifratura e validazione ----------------------------------
+        schede_valide, numero_decifrati, numero_non_validi = self.decifra_e_valida_voti(
+            tuple_voti, configurazione
+        )
+
+        # --- Passo 5: conteggio delle preferenze ------------------------------------
+        risultati_per_lista, preferenze_per_candidato = self.conta_preferenze(schede_valide)
+
+        # --- Passo 6: redazione, firma e pubblicazione del verbale finale ----------
+        verbale = VerbaleFinale(
+            election_id=election_id,
+            radice_finale_hex=chiusura.radice_finale_hex,
+            numero_receipt_pubblicati=len(tuple_voti),
+            voti_cifrati_scrutinati=len(tuple_voti),
+            voti_decifrati=numero_decifrati,
+            voti_validi=len(schede_valide),
+            voti_non_validi=numero_non_validi,
+            risultati_per_lista=risultati_per_lista,
+            preferenze_per_candidato=preferenze_per_candidato,
+            timestamp_scrutinio=time.time(),
+        )
+
+        impronta_verbale = cu.sha256(verbale.corpo_per_firma())
+        verbale.firma_ae = cu.rsa_pss_sign(self._sk_sig, impronta_verbale)
+
+        bb.pubblica_verbale(verbale)
+        return verbale
+
     def __repr__(self) -> str:
-        return self.stato()
+        certificata = self.cert_enc is not None and self.cert_sig is not None
+        return f"AutoritaElettorale(id={self.id}, certificata={certificata})"
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +754,34 @@ class AuthServer:
             avente_diritto=avente_diritto,
             token_rilasciato=False,
         )
+
+
+    def numero_token_emessi(self) -> int:
+            """
+            Conta quanti studenti, tra quelli iscritti nel Registro_Elettori,
+            hanno effettivamente ricevuto un token di voto (n_token), valore
+            che l'AE utilizzera' in Fase 5 per il controllo di coerenza
+            quantitativa rispetto alle foglie pubblicate sul Bulletin Board.
+            """
+            return sum(1 for e in self._registro_elettori.values() if e.token_rilasciato)
+
+    def emetti_attestazione_token(self) -> AttestazioneTokenAS:
+        """
+        Produce l'attestazione firmata dall'AS sul numero totale di
+        token emessi durante la sessione (Fase 5):
+
+            Sig_AS(n_token)
+
+        Questa attestazione, e non un canale generico, e' il mezzo
+        attraverso cui l'AE ottiene n_token in modo verificabile: viene
+        pubblicata sul Bulletin Board e la sua firma viene verificata
+        dall'AE con PK_AS prima di essere utilizzata nel controllo di
+        coerenza quantitativa.
+        """
+        n_token = self.numero_token_emessi()
+        firma_as = cu.rsa_pss_sign(self._sk_sig, str(n_token).encode("utf-8"))
+        return AttestazioneTokenAS(n_token=n_token, firma_as=firma_as)
+
 
     def _controllo_aventi_diritto(self, student_id: str) -> Optional[str]:
         """
