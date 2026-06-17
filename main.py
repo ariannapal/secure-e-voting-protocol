@@ -12,10 +12,14 @@ interattivo, che riflettono i ruoli del protocollo WP2:
         Fase 5  – Chiusura urna, scrutinio, pubblicazione verbale finale
 
   [E] Sportello Elettore  (User Agent dello studente)
-        Fase 1b – Bootstrap della fiducia (verifica offline certificati)
-        Fase 2  – Autenticazione OIDC + FIDO2, rilascio token pseudonimo
-        Fase 3/4– Preparazione voto (RSA-OAEP), invio all'Urna, ricevuta
-        Verifica– Controllo locale token e ricevuta crittografica
+        Autenticati    – passo unico per l'elettore: internamente esegue
+                         in automatico il Bootstrap della fiducia (Fase 1b,
+                         verifica offline dei certificati) e poi la Fase 2
+                         (OIDC + FIDO2, rilascio token pseudonimo). L'esito
+                         del bootstrap viene comunicato chiaramente prima
+                         di procedere con l'autenticazione vera e propria.
+        Fase 3/4      – Preparazione voto (RSA-OAEP), invio all'Urna, ricevuta
+        Verifica      – Controllo locale token e ricevuta crittografica
 
 Separazione identita' / voto (WP2, Pseudo-anonimato):
     - Lo student_id viene inserito UNA SOLA VOLTA allo sportello elettore,
@@ -294,7 +298,6 @@ def sportello_elettore(stato: StatoSistema) -> None:
 
     # Ogni sessione elettore e' un Client fresco (memoria volatile).
     client: Client | None = None
-    student_id_sessione: str | None = None   # tenuto solo per stampe, mai trasmesso all'Urna
 
     while True:
         print()
@@ -302,31 +305,28 @@ def sportello_elettore(stato: StatoSistema) -> None:
         print("  MENU ELETTORE")
         print(linea())
 
-        # Stato corrente della sessione
-        fase_bootstrap = client is not None and client.fiducia_inizializzata
-        fase_autenticata = fase_bootstrap and client.token is not None
+        # Stato corrente della sessione. Il bootstrap della fiducia (Fase 1b)
+        # non e' piu' un passo separato per l'utente: avviene in modo
+        # automatico e trasparente all'interno dell'autenticazione (vedi
+        # '_el_autentica_elettore'), che lo combina con la Fase 2.
+        fase_autenticata = client is not None and client.token is not None
         fase_votato = fase_autenticata and client.ultima_ricevuta is not None
 
-        if not fase_bootstrap:
-            print("  1  Bootstrap della fiducia (verifica certificati AE, Urna, AS)")
+        if not fase_autenticata:
+            print("  1  Autenticati  (verifica certificati + login → diritto di voto)")
         else:
-            print("  ·  Bootstrap completato — certificati verificati")
-
-        if fase_bootstrap and not fase_autenticata:
-            print("  2  Autenticati  (OIDC + FIDO2 → token pseudonimo)")
-        elif fase_autenticata:
-            print("  ·  Autenticato  — token pseudonimo T in memoria")
+            print("  ·  Autenticato  — identita' verificata, token pseudonimo in memoria")
 
         if fase_autenticata and not fase_votato:
             if stato.elezione_aperta:
-                print("  3  Vota  (cifra la scheda RSA-OAEP → invia all'Urna → ricevuta)")
+                print("  2  Vota  (cifra la scheda → invia all'Urna → ricevuta)")
             else:
                 avviso("L'elezione e' stata chiusa: non e' piu' possibile votare.")
 
         if fase_votato:
             print("  ·  Voto espresso — ricevuta crittografica ottenuta")
-            print("  4  Verifica token pseudonimo  (controllo Sig_AS locale)")
-            print("  5  Verifica ricevuta di voto  (ReceiptID + Sig_UE locale)")
+            print("  3  Verifica token pseudonimo  (controllo Sig_AS locale)")
+            print("  4  Verifica ricevuta di voto  (ReceiptID + Sig_UE locale)")
 
         print("  0  Esci dallo sportello elettore")
         print()
@@ -336,45 +336,53 @@ def sportello_elettore(stato: StatoSistema) -> None:
         if scelta == "0":
             break
 
-        elif scelta == "1" and not fase_bootstrap:
-            client, student_id_sessione = _el_bootstrap(stato)
+        elif scelta == "1" and not fase_autenticata:
+            client, _ = _el_autentica_elettore(stato)
 
-        elif scelta == "2" and fase_bootstrap and not fase_autenticata:
-            _el_autenticati(stato, client, student_id_sessione)
-
-        elif scelta == "3" and fase_autenticata and not fase_votato and stato.elezione_aperta:
+        elif scelta == "2" and fase_autenticata and not fase_votato and stato.elezione_aperta:
             _el_vota(stato, client)
 
-        elif scelta == "4" and fase_votato:
+        elif scelta == "3" and fase_votato:
             _el_verifica_token(client)
 
-        elif scelta == "5" and fase_votato:
+        elif scelta == "4" and fase_votato:
             _el_verifica_ricevuta(client)
 
         else:
             avviso("Opzione non disponibile in questa fase della sessione.")
 
 
-def _el_bootstrap(stato: StatoSistema) -> tuple[Client | None, str | None]:
+def _el_autentica_elettore(stato: StatoSistema) -> tuple[Client | None, str | None]:
     """
-    Fase 1b — Bootstrap della fiducia.
+    Procedura unica di accesso dell'elettore: dal suo punto di vista e'
+    UN SOLO passo ("Autenticati"), anche se internamente combina due
+    fasi del protocollo WP2:
 
-    Il Client scarica (qui: riceve in memoria) i certificati X.509 di
-    AE, Urna e AS e ne verifica offline la firma della CA, usando
-    PK_CA preventivamente cablata nell'applicazione.
-    Questo e' l'UNICO punto in cui viene richiesto lo student_id:
-    serve per identificare lo studente in Fase 2 nel Registro_Elettori.
-    Dalla Fase 3 in poi il voto avviene tramite token pseudonimo.
+      Passo 1/2 (Fase 1b, automatico) — Bootstrap della fiducia: il
+        client verifica offline, tramite PK_CA cablata, i certificati
+        X.509 di AE, Urna e AS. Non e' piu' un'azione separata da
+        scegliere a menu: avviene da sola, e l'esito viene comunicato
+        chiaramente prima di proseguire.
+
+      Passo 2/2 (Fase 2) — Autenticazione vera e propria: OIDC + FIDO2
+        simulati, controllo del Registro_Elettori e rilascio del token
+        pseudonimo di voto T, firmato dall'AS.
+
+    Lo student_ID viene chiesto una sola volta, qui, e serve solo per
+    il controllo nel Registro_Elettori: da questo punto in poi tutte
+    le operazioni (voto, ricevuta) avvengono tramite il token
+    pseudonimo T, senza alcun legame con l'identita' reale.
+
+    Ritorna (client, student_id) se l'intera procedura ha successo,
+    altrimenti (None, None): in caso di errore (in un punto qualsiasi)
+    l'elettore puo' semplicemente riprovare da capo con "Autenticati".
     """
-    sezione("Bootstrap della Fiducia — Fase 1b")
+    sezione("Autenticati — accesso allo sportello")
     print()
-    print("  Il client scarica e verifica offline i certificati X.509")
-    print("  di AE, Urna e AS usando PK_CA cablata nell'applicazione.")
-    print()
-    print("  Ti verra' chiesto lo student_ID una sola volta: serve")
-    print("  esclusivamente per il controllo nel Registro_Elettori")
-    print("  durante l'autenticazione (Fase 2).")
-    print("  Dalla Fase 3 opererai tramite token pseudonimo anonimo.")
+    print("  Per poter votare devi prima identificarti. Ti verra' chiesto")
+    print("  lo student_ID una sola volta: serve solo per il controllo nel")
+    print("  Registro_Elettori. Da qui in avanti opererai in forma anonima,")
+    print("  tramite un token pseudonimo: l'Urna non sapra' mai chi sei.")
     print()
 
     student_id = input("  student_ID: ").strip()
@@ -382,92 +390,64 @@ def _el_bootstrap(stato: StatoSistema) -> tuple[Client | None, str | None]:
         errore("student_ID non può essere vuoto.")
         return None, None
 
+    # ------------------------------------------------------------------
+    # Passo 1/2 — Bootstrap della fiducia (Fase 1b), automatico
+    # ------------------------------------------------------------------
+    print()
+    print("  Passo 1/2  Verifica dei certificati dell'infrastruttura...")
+    info("Il tuo dispositivo controlla offline, con PK_CA gia' cablata,")
+    info("che le chiavi pubbliche di AE, Urna e AS siano autentiche")
+    info("(nessuna interrogazione di rete necessaria).")
+
     try:
         client = bootstrap_client(stato.sistema, student_id)
     except RuntimeError as e:
+        print()
         errore(str(e))
         return None, None
 
-    print()
-    sezione("Risultato verifica certificati (offline, tramite PK_CA)")
-    campo("PK_AE_enc verificata:",   "si'" if client.pk_ae_enc  else "no")
-    campo("PK_AE_sig verificata:",   "si'" if client.pk_ae_sig  else "no")
-    campo("PK_UE_sig verificata:",   "si'" if client.pk_ue_sig  else "no")
-    campo("PK_AS_sig verificata:",   "si'" if client.pk_as_sig  else "no")
-    campo("Fiducia inizializzata:",  "si'" if client.fiducia_inizializzata else "no")
-    print()
-    ok("Bootstrap completato. Puoi procedere con l'autenticazione.")
-
-    return client, student_id
-
-
-def _el_autenticati(stato: StatoSistema, client: Client, student_id: str) -> None:
-    """
-    Fase 2 — Autenticazione e rilascio del token pseudonimo.
-
-    Il protocollo:
-      1) AS costruisce la OIDC_Request verso l'IdP universitario
-      2) IdP esegue il login FIDO2 (challenge/response simulati)
-      3) IdP restituisce un ID Token; l'AS lo verifica con PK_IdP
-      4) AS consulta il Registro_Elettori (avente_diritto, non gia' votato)
-      5) AS genera T (CSPRNG), calcola h_T = SHA256(T),
-         firma Sig_AS(T) = Sig(SK_AS, h_T)  [RSA-PSS]
-      6) Token consegnato al Client in memoria volatile
-
-    Al termine lo student_id non e' piu' necessario: tutte le
-    operazioni successive usano esclusivamente T (pseudo-anonimato).
-    """
-    sezione("FASE 2 — Autenticazione e rilascio token pseudonimo")
-    print()
-    print("  Passo 1/5  OIDC_Request verso l'Identity Provider...")
-    oidc_req = stato.sistema.auth_server.simula_richiesta_oidc(
-        client_id=stato.sistema.auth_server.id,
-        redirect_uri="https://voto.universita.it/callback",
-    )
-    info(f"client_id     = {oidc_req['client_id']}")
-    info(f"redirect_uri  = {oidc_req['redirect_uri']}")
-    info(f"response_type = {oidc_req['response_type']}")
-    info(f"scope         = {oidc_req['scope']}")
+    if not client.fiducia_inizializzata:
+        print()
+        errore("Verifica dei certificati non riuscita: impossibile continuare.")
+        return None, None
 
     print()
-    print("  Passo 2/5  Simulazione login FIDO2 (challenge / response)...")
-    info("challenge  ← CSPRNG(32 byte)")
-    info("firma      = Sig(SK_studente, challenge)  [RSA-PSS, simulata]")
-    info("verifica   = Verify(PK_studente, challenge, firma)  → OK")
+    ok("Bootstrap riuscito: certificati di AE, Urna e AS verificati con successo.")
+    info(f"PK_AE_enc, PK_AE_sig, PK_UE_sig, PK_AS_sig caricate e autenticate.")
 
+    # ------------------------------------------------------------------
+    # Passo 2/2 — Autenticazione OIDC + FIDO2 e rilascio del token (Fase 2)
+    # ------------------------------------------------------------------
     print()
-    print("  Passo 3/5  ID Token ricevuto dall'IdP e verificato dall'AS...")
-    info("Verify(PK_IdP, ID_Token) → OK")
-
+    print("  Passo 2/2  Autenticazione e rilascio del token di voto...")
     print()
-    print("  Passo 4/5  Controllo Registro_Elettori...")
+    info("OIDC_Request → Identity Provider universitario")
+    info("Login FIDO2 (challenge/response) con l'authenticator dello studente")
+    info("ID Token verificato dall'AS: Verify(PK_IdP, ID_Token)")
+    info("Controllo Registro_Elettori: avente diritto e non gia' votato")
 
     try:
         token = client.autenticati(stato.sistema.auth_server)
     except PermissionError as e:
         print()
         errore(str(e))
-        return
+        print()
+        info("Puoi riprovare scegliendo di nuovo 'Autenticati'.")
+        return None, None
 
-    info(f"student_id '{student_id}': avente_diritto = True, token_rilasciato → True")
-
-    print()
-    print("  Passo 5/5  Generazione e firma del token pseudonimo T...")
-    info("T         ← CSPRNG  (identificativo pseudonimo, nessun legame con student_id)")
-    info("h_T       = SHA256(T)")
-    info("Sig_AS(T) = Sig(SK_AS, h_T)  [RSA-PSS 2048 bit]")
-    info("Token consegnato al Client in memoria volatile")
+    info("Token pseudonimo T generato (CSPRNG) e firmato dall'AS: Sig_AS(T)")
 
     print()
     sezione("Token pseudonimo ottenuto")
     campo("T (prime 32 car.):",   token.valore[:32] + "...")
-    campo("h_T (prime 32 car.):", token.hash_token.hex()[:32] + "...")
     campo("Sig_AS(T) (prime 32):", token.firma_as.hex()[:32] + "...")
     print()
-    ok("Autenticazione completata.")
+    ok("Autenticazione completata: hai ottenuto il diritto di voto.")
     print()
-    print("  Da questo momento l'identita' reale non e' piu' necessaria.")
-    print("  Il voto avverra' tramite T: l'Urna non sapra' chi sei.")
+    print("  Da questo momento la tua identita' reale non e' piu' necessaria:")
+    print("  il voto avverra' tramite il token T, in forma anonima.")
+
+    return client, student_id
 
 
 def _el_vota(stato: StatoSistema, client: Client) -> None:
@@ -667,7 +647,7 @@ def menu_principale(stato: StatoSistema) -> None:
         print("     Fase 1: inizializzazione  |  Fase 5: scrutinio")
         print()
         print("  E  Sportello Elettore        (sessione di voto studente)")
-        print("     Bootstrap → Autenticazione → Voto → Verifica ricevuta")
+        print("     Autenticati → Vota → Verifica ricevuta")
         print()
         print("  0  Esci")
         print()

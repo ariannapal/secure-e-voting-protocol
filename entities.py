@@ -535,7 +535,7 @@ class Urna:
 
     # Finestra temporale massima (in secondi) prima della pubblicazione
     # forzata del batch corrente, anche sotto soglia.
-    DELTA_MAX_SECONDI = 15 * 60
+    DELTA_MAX_SECONDI = 60
 
     def __init__(self):
         self.id = "UE-URNA"
