@@ -51,12 +51,14 @@ def stampa_menu() -> None:
 
 def azione_inizializza_sistema(ctx: ContestoCLI) -> None:
     stampa_intestazione("FASE 1 - Setup iniziale e PKI")
-    print("Generazione delle chiavi RSA in corso (potrebbe richiedere alcuni secondi)...")
+    print("Inizializzazione in corso...")
+    
+    # Se il file studenti.json esiste, il sistema lo caricherà automaticamente 
+    # grazie alla modifica fatta in AuthServer.__init__
     ctx.sistema = inizializza_sistema()
-    print("\nSistema inizializzato correttamente:")
-    print(f"  - CA:         {ctx.sistema.ca.nome}")
-    print(f"  - {ctx.sistema.ae!r}")
-    print(f"  - {ctx.sistema.urna!r}")
+    
+    print("\nSistema inizializzato.")
+    print(f"Registro elettori caricato da file: studenti.json") # Aggiunta nota
     print(f"  - {ctx.sistema.auth_server!r}")
 
 

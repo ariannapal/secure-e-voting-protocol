@@ -25,6 +25,7 @@ struttura di base.
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -238,16 +239,40 @@ class AuthServer:
 
     BIT_SIZE_AS = 2048
 
-    def __init__(self):
+    def __init__(self, path_registro: str = "studenti.json"):
         self.id = "AS-AUTENTICAZIONE"
-
-        self._sk_sig: rsa.RSAPrivateKey = cu.genera_coppia_rsa(self.BIT_SIZE_AS)
-        self.pk_sig: rsa.RSAPublicKey = self._sk_sig.public_key()
-
-        self.cert_sig: Optional[Certificato] = None
-
-        # Registro_Elettori = { student_ID -> RegistroElettoreEntry }
+        self._sk_sig = cu.genera_coppia_rsa(self.BIT_SIZE_AS)
+        self.pk_sig = self._sk_sig.public_key()
+        self.cert_sig = None
         self._registro_elettori: Dict[str, RegistroElettoreEntry] = {}
+        
+        # Caricamento del JSON nel server
+        self._carica_registro(path_registro)
+
+    def _carica_registro(self, path: str):
+        try:
+            with open(path, 'r') as f:
+                dati = json.load(f)
+                for s in dati["studenti"]:
+                    self._registro_elettori[s["student_id"]] = RegistroElettoreEntry(
+                        student_id=s["student_id"],
+                        avente_diritto=s["avente_diritto"],
+                        token_rilasciato=s["token_rilasciato"]
+                    )
+        except FileNotFoundError:
+            print(f"[Avviso] File {path} non trovato.")
+
+    def salva_registro(self, path: str = "studenti.json"):
+        """Salva lo stato attuale del registro nel file JSON."""
+        dati = {"studenti": []}
+        for entry in self._registro_elettori.values():
+            dati["studenti"].append({
+                "student_id": entry.student_id,
+                "avente_diritto": entry.avente_diritto,
+                "token_rilasciato": entry.token_rilasciato
+            })
+        with open(path, 'w') as f:
+            json.dump(dati, f, indent=4)
 
     def richiedi_certificazione(self, ca: CertificationAuthority) -> None:
         """Ottiene il certificato X.509 per la propria chiave di firma."""
@@ -377,6 +402,9 @@ class AuthServer:
 
         # Aggiornamento dello stato: il token e' stato rilasciato.
         self._registro_elettori[student_id].token_rilasciato = True
+
+        # Salva immediatamente su disco per rendere persistente il cambiamento
+        self.salva_registro()
 
         return token
 
