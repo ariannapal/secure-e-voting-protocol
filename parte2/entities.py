@@ -775,12 +775,15 @@ class AuthServer:
             )
 
         with path.open("r", encoding="utf-8") as f:
-            dati = json.load(f)
+            contenuto = json.load(f)
 
-        if not isinstance(dati, list):
+        if isinstance(contenuto, dict) and isinstance(contenuto.get("studenti"), list):
+            dati = contenuto["studenti"]
+        else:
             raise ValueError(
                 "Il file del Registro_Elettori deve contenere un array JSON "
-                "di oggetti, uno per ciascuno studente."
+                "di oggetti (uno per ciascuno studente), oppure un oggetto "
+                "con una chiave 'studenti' che contenga tale array."
             )
 
         nuovo_registro: Dict[str, RegistroElettoreEntry] = {}
