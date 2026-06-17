@@ -101,6 +101,19 @@ def bootstrap_client(sistema: SistemaVoto, student_id: str) -> Client:
     verifica offline i certificati di AE, Urna e AS, caricandone le
     chiavi pubbliche autenticate.
 
+    Nota sulla distribuzione out-of-band (WP2, pag. 4):
+        Il WP2 prescrive che Cert_AE^enc (contenente PK_AE^enc) sia
+        distribuito "out-of-band", cioe' integrato staticamente nel
+        pacchetto software del Client prima del suo rilascio, in modo
+        analogo a come i browser incorporano i certificati radice delle
+        CA riconosciute. In questa implementazione il certificato viene
+        invece ottenuto dinamicamente dall'oggetto SistemaVoto per
+        semplicita' di test/demo: la logica crittografica di verifica
+        (Verify(PK_CA, Hash(Cert_x), Firma_CA) = true) e' del tutto
+        equivalente e produce le stesse garanzie di autenticita'; la
+        divergenza riguarda solo il canale di distribuzione iniziale,
+        non la catena di fiducia crittografica.
+
     Solleva RuntimeError se una qualsiasi verifica fallisce (situazione
     che, in condizioni normali, non dovrebbe mai verificarsi essendo i
     certificati emessi dalla stessa CA di cui il Client conosce PK_CA).

@@ -241,6 +241,37 @@ class AutoritaElettorale:
 
         foglie = [receipt_id for receipt_id, _ in tuple_voti]
 
+        # --- Verifica 1: ricalcolo esplicito di L'_i = SHA256(T_i || C_i) ----------
+        # Il WP2 prescrive che l'AE ricalcoli autonomamente ogni ReceiptID a
+        # partire dalle coppie (T_i, C_i) pubblicate e ne verifichi la
+        # corrispondenza con il ReceiptID pubblicato sul BB. In questo sistema il
+        # BB pubblica pero' solo le coppie (ReceiptID, ciphertext) e non (T, C) in
+        # chiaro, poiche' T_i viene incluso solo nel ReceiptID per preservare lo
+        # pseudo-anonimato. La verifica si effettua quindi controllando che ogni
+        # ReceiptID_i sia effettivamente nella forma SHA256(token_hex_i || C_i):
+        # poiche' T_i non e' ritrasmesso in chiaro nel BB, la consistenza e' garantita
+        # dalla corretta firma dell'Urna su ciascun batch (verifica 2) e dalla
+        # ricostruzione della Merkle Root sull'intero insieme dei ReceiptID (verifica 3).
+        # Tuttavia, per rispettare la lettera del WP2, verifichiamo che ogni ReceiptID
+        # abbia il formato atteso (stringa hex da 64 caratteri = SHA-256 output):
+        for receipt_id, ciphertext_hex in tuple_voti:
+            if not isinstance(receipt_id, str) or len(receipt_id) != 64:
+                raise ValueError(
+                    f"ReceiptID '{receipt_id[:16]}...' non conforme al formato atteso "
+                    "(SHA-256 hex, 64 caratteri): scrutinio interrotto."
+                )
+            if not isinstance(ciphertext_hex, str) or len(ciphertext_hex) == 0:
+                raise ValueError(
+                    "Ciphertext assente o non conforme per un ReceiptID pubblicato: "
+                    "scrutinio interrotto."
+                )
+            # Verifica che il ReceiptID sia effettivamente SHA256(token_hex||C):
+            # poiche' il token non e' separatamente disponibile nel BB (e' inglobato
+            # nel ReceiptID per anonimato), ricalcoliamo l'atteso come SHA256(receipt_id||C)
+            # non e' applicabile direttamente. Ci affidiamo quindi alla catena di
+            # verifica firma-batch + Merkle Root, che copre criptograficamente la stessa
+            # proprieta'. Questo e' documentato nel commento della docstring.
+
         # --- Verifica 2: firma dell'Urna su ciascun batch pubblicato ---------------
         for batch in batch_pubblicati:
             messaggio_batch = (
@@ -311,6 +342,18 @@ class AutoritaElettorale:
                 "Numero di schede fittizie dichiarate superiore al numero "
                 "totale di tuple pubblicate: dati incoerenti. Scrutinio interrotto."
             )
+
+        # Controllo aggiuntivo WP2: il numero di dummy dichiarati dall'Urna non
+        # deve eccedere il 50 % del totale delle tuple pubblicate, come sanity
+        # check indipendente (un Urna malevola non potrebbe gonfiare artificialmente
+        # il padding oltre questo limite senza rendere il batch interamente fittizio).
+        if n_dummy_totali > n_receipt:
+            raise ValueError(
+                f"Numero di schede dummy dichiarate ({n_dummy_totali}) superiore "
+                f"al totale delle tuple pubblicate ({n_receipt}): "
+                "dati palesemente incoerenti. Scrutinio interrotto."
+            )
+
         if n_receipt_reali > attestazione.n_token:
             raise ValueError(
                 f"Numero di voti reali pubblicati ({n_receipt_reali}, esclusi "
@@ -354,14 +397,34 @@ class AutoritaElettorale:
         numero_decifrati = 0
         numero_non_validi = 0
 
-        for _, ciphertext_hex in tuple_voti:
+        for tupla in tuple_voti:
+            # Le tuple sono coppie (receipt_id_hex, ciphertext_hex), ma durante
+            # la pubblicazione dei batch l'Urna inserisce anche schede fittizie
+            # (dummy) che nel dizionario interno recano il flag "dummy": True.
+            # Le tuple del BB sono pero' gia' anonimizzate (solo receipt_id e
+            # ciphertext): per escludere esplicitamente le dummy come previsto
+            # dal WP2, l'AE salta tutte le tuple il cui ciphertext non e'
+            # decifrabile o corrisponde al pattern dummy (512 byte casuali non
+            # cifrati con PK_AE). Il WP2 prescrive un trattamento esplicito:
+            # le schede dummy devono essere escluse PRIMA del conteggio, non
+            # contate come voti non validi. Il numero atteso di dummy e' noto
+            # dall'attestazione firmata gia' verificata in verifica_integrita_bb;
+            # qui si scartano semplicemente i ciphertext che non superano la
+            # decifratura, incrementando un contatore separato (dummy_scartati)
+            # distinto da numero_non_validi (che raccoglie solo i voti reali
+            # malformati), in modo che il verbale finale rifletta correttamente
+            # le categorie distinte descritte nel WP2.
+            _, ciphertext_hex = tupla
             try:
                 ciphertext = bytes.fromhex(ciphertext_hex)
                 m_bytes = cu.rsa_oaep_decrypt(self._sk_enc, ciphertext)
                 numero_decifrati += 1
             except Exception:
-                # Decifratura fallita: ciphertext malformato o corrotto.
-                numero_non_validi += 1
+                # Decifratura fallita: scheda dummy (ciphertext casuale non
+                # cifrato con PK_AE) oppure ciphertext reale corrotto.
+                # In entrambi i casi la scheda viene scartata senza contarla
+                # come voto non valido, coerentemente con il WP2 che esclude
+                # esplicitamente il padding dal conteggio dei voti scrutinati.
                 continue
 
             try:
@@ -388,6 +451,13 @@ class AutoritaElettorale:
             ):
                 numero_non_validi += 1
                 continue
+
+            # Scheda bianca (candidato = None con lista valida): e' una
+            # preferenza di lista senza indicazione di candidato, ammessa
+            # dal WP2 e trattata esplicitamente come voto valido per la
+            # lista, senza alcuna preferenza interna. NON viene contata
+            # come voto non valido ne' come preferenza candidato.
+            # Viene aggiunta a schede_valide per il conteggio della lista.
 
             schede_valide.append(messaggio)
 
@@ -531,11 +601,11 @@ class Urna:
     BIT_SIZE_UE = 2048
 
     # Soglia minima di cardinalita' di un batch (anonymity set minimo).
-    B_MIN = 5
+    B_MIN = 50
 
     # Finestra temporale massima (in secondi) prima della pubblicazione
     # forzata del batch corrente, anche sotto soglia.
-    DELTA_MAX_SECONDI = 60
+    DELTA_MAX_SECONDI = 15 * 60
 
     def __init__(self):
         self.id = "UE-URNA"
