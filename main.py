@@ -143,7 +143,11 @@ def sportello_amministrativo(stato: StatoSistema) -> None:
             break
 
         elif scelta == "1" and not stato.pronto:
-            _amm_inizializza(stato)
+            completato = _amm_inizializza(stato)
+            if completato:
+                # Interrompi il loop dello sportello amm. per tornare al menu principale
+                print("\n  Ritorno al menu principale...")
+                break
 
         elif scelta == "5" and stato.elezione_aperta:
             _amm_scrutinio(stato)
@@ -197,6 +201,9 @@ def _amm_inizializza(stato: StatoSistema) -> None:
     ok("Fase 1 completata. Il sistema e' pronto ad accettare votanti.")
     print()
     info("Gli elettori possono ora usare lo Sportello Elettore.")
+
+    # Ritorna True per segnalare che l'inizializzazione è avvenuta
+    return True
 
 
 def _amm_scrutinio(stato: StatoSistema) -> None:
@@ -320,7 +327,7 @@ def sportello_elettore(stato: StatoSistema) -> None:
                 avviso("L'elezione e' stata chiusa: non e' piu' possibile votare.")
 
         if fase_votato:
-            print("  ·  Voto espresso — ricevuta crittografica ottenuta")
+            print("  ·  Voto registro con successo — ricevuta crittografica ottenuta")
             print("  3  Verifica token pseudonimo  (controllo Sig_AS locale)")
             print("  4  Verifica ricevuta di voto  (ReceiptID + Sig_UE locale)")
 
