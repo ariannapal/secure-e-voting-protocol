@@ -1,6 +1,4 @@
 """
-main.py
--------
 CLI per il sistema di voto elettronico universitario.
 
 Realizza DUE sportelli distinti, ciascuno con il proprio loop
@@ -29,8 +27,6 @@ Separazione identita' / voto (WP2, Pseudo-anonimato):
     - Lo sportello amministrativo non interagisce mai con identita' reali
       degli elettori: gestisce solo strutture aggregate (urna, BB, verbale).
 
-Esegui con:
-    python3 main.py
 """
 
 import sys
@@ -213,7 +209,7 @@ def _amm_scrutinio(stato: StatoSistema) -> None:
     print("      stati pubblicati durante la finestra di voto al")
     print("      raggiungimento della soglia o del timeout (Fase 4)")
     print("   2) L'AS pubblica l'attestazione firmata su n_token emessi")
-    print("   3) L'AE scarica tutto dal Bulletin Board (NON dall'Urna)")
+    print("   3) L'AE scarica tutto dal Bulletin Board ")
     print("   4) L'AE verifica integrita': firme sui batch, Merkle Root,")
     print("      Sig_UE sulla chiusura, Sig_AS sull'attestazione")
     print("   5) L'AE verifica coerenza quantitativa: |foglie reali| <= n_token")
