@@ -633,6 +633,20 @@ def _el_verifica_ricevuta(client: Client) -> None:
 
 def menu_principale(stato: StatoSistema) -> None:
     while True:
+
+        # Se l'elezione è chiusa, mostriamo una schermata bloccata finale
+        if stato.elezione_chiusa:
+            intestazione("SISTEMA DI VOTO ELETTRONICO UNIVERSITARIO")
+            print("\n  ⚠  L'elezione e' conclusa e il verbale e' stato pubblicato.")
+            print("  Il sistema e' bloccato in modalita' consultazione finale.")
+            print("\n  [0] Esci")
+            
+            scelta = input("\n  Accesso: ").strip()
+            if scelta == "0":
+                sys.exit(0)
+            continue # Ignora qualsiasi altro input
+
+        # Se il sistema non è pronto
         intestazione("SISTEMA DI VOTO ELETTRONICO UNIVERSITARIO")
         
         if not stato.pronto:
@@ -650,18 +664,15 @@ def menu_principale(stato: StatoSistema) -> None:
                 sys.exit(0)
             else:
                 avviso("Scelta non valida.")
-        
+
+        # Se il sistema è pronto e l'elezione è aperta
         else:
-            # Menu completo (mostrato solo dopo l'inizializzazione)
-            print()
-            ok("Sistema inizializzato e pronto.")
+            print("\n  Sistema inizializzato e attivo.")
             print("\n  [A] Sportello Amministrativo (Gestione)")
             print("  [E] Sportello Elettore       (Voto)")
             print("  [0] Esci")
-            print()
             
-            scelta = input("  Accesso: ").strip().upper()
-            
+            scelta = input("\n  Accesso: ").strip().upper()
             if scelta == "A":
                 sportello_amministrativo(stato)
             elif scelta == "E":
